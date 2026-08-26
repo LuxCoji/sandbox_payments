@@ -1,39 +1,84 @@
-# Architecture
+# FinSim System Architecture
 
-## System Overview
+FinSim is a deterministic, event-sourced financial digital twin designed for payment network simulation, discrete-event scheduling, and branch-aware time travel.
 
-<!-- TODO: Add high-level architecture diagram -->
+---
 
-## Subsystem Responsibilities
+## 1. Subsystem Decomposition & Ownership
 
-### Core Engine (`sim/core/`)
+As established in `initial_plan.md`, the platform is divided across three parallel contributors:
 
-<!-- TODO: Document WorldEngine, event lifecycle, aggregate state management -->
+```
++-----------------------------------------------------------------------------+
+|                               CONTRIBUTOR MAP                               |
++-------------------------------+-----------------------------+---------------+
+|           Person 1            |          Person 2           |   Person 3    |
++-------------------------------+-----------------------------+---------------+
+| * Core Engine (sim/core/)     | * Population (sim/pop/)     | * ChronoDAG   |
+| * Gateway (sim/gateway/)      | * PaySim Calibration        | * Hashing     |
+| * Scheduler (sim/scheduler/)  | * Behaviour Model           | * Obs         |
+| * Repo, Config, CI            | * Agent Profiles & Temporal | * Tests       |
++-------------------------------+-----------------------------+---------------+
+```
 
-### Population Model (`sim/population/`)
+### Current Status
 
-<!-- TODO: Document BehaviourModel, calibration pipeline, agent lifecycle -->
+| Subsystem | Location | Status |
+| :--- | :--- | :--- |
+| **Core Contracts** | `sim/core/interfaces.py`, `sim/core/events.py` | Defined (Contracts) |
+| **Core Engine** | `sim/core/engine.py`, `sim/core/*.py` | Pending (Person 1) |
+| **Scheduler** | `sim/scheduler/rng.py`, `sim/scheduler/env.py` | Implemented (19 tests passing) |
+| **Gateway Contracts** | `sim/gateway/interfaces.py` | Defined (Contracts) |
+| **Gateway Implementation** | `sim/gateway/registry.py`, `sim/gateway/policy.py` | Pending (Person 1) |
+| **Population Contracts** | `sim/population/interfaces.py` | Defined (Contracts) |
+| **Population Implementation** | `sim/population/*.py`, `scripts/calibrate.py` | Pending (Person 2) |
+| **Chrono Contracts** | `sim/chrono/interfaces.py` | Defined (Contracts) |
+| **Chrono Implementation** | `sim/chrono/*.py` | Pending (Person 3) |
+| **Observability** | `sim/observability/*.py` | Pending (Person 3) |
 
-### ChronoDAG (`sim/chrono/`)
+---
 
-<!-- TODO: Document branching, checkpointing, replay, state hashing -->
+## 2. State & Event Causality Model (CQRS)
 
-### Tool Gateway (`sim/gateway/`)
+FinSim follows an event-sourced state transition model:
 
-<!-- TODO: Document ToolRegistry, policy enforcement, capability model -->
+```
+Intent (from BehaviourModel or Agent)
+  |
+  v
+Command (validated by WorldEngine against in-memory aggregates)
+  |
+  v
+DomainEvent(s) (emitted: PaymentRequested, AccountDebited, etc.)
+  |
+  v
+StoredEvent (persisted to ChronoDAG with branch_id, seq_num, lineage)
+  |
+  v
+apply_event (in-memory state projection updated: State' = Apply(State, Event))
+```
 
-### Scheduler (`sim/scheduler/`)
+- **In-Memory Projections**: Aggregates (`Account`, `Device`, `Merchant`, `Gateway`) are strictly updated by event handlers (`apply_event`).
+- **Replay & Checkpoints**: Replay passes stored events through the same `apply_event` pipeline, ensuring identical deterministic state hashes.
 
-<!-- TODO: Document SimulationEnv, DeterministicRNG -->
+---
 
-### Observability (`sim/observability/`)
+## 3. Boundary Rules & Import Isolation
 
-<!-- TODO: Document tracing, metrics, logging -->
+Configured in `pyproject.toml` and enforced via `import-linter` in CI:
 
-## State & Event Causality Model
+1. Subsystems must only import from another subsystem's `interfaces.py` (or `sim/core/events.py`).
+2. Direct imports of implementation modules across subsystem boundaries (e.g. `sim.core.engine` inside `sim/population/`) are forbidden.
+3. No direct `simpy` imports outside `sim/scheduler/env.py`.
+4. No unmanaged random calls (`random`, `numpy.random.seed()`) anywhere in the codebase.
 
-<!-- TODO: Document CQRS/event-driven state transitions -->
+---
 
-## Data Flow
+## 4. Key Design Decisions
 
-<!-- TODO: Add data flow diagram -->
+- **Currency**: INR only, represented as integer paise (`₹1.00 = 100 paise`).
+- **Identifiers**: UUIDv7 time-ordered strings.
+- **Simulation Time**: Discrete nanoseconds (`sim_time_ns: float`).
+- **Roles**: `USER`, `MERCHANT`, `BANK_OPS`, `RISK_ANALYST`, `RED_AGENT`, `BLUE_AGENT`.
+- **Transaction Types**: `PAYMENT`, `TRANSFER`, `CASH_IN`, `CASH_OUT`, `DEBIT`, `REFUND`, `CHARGEBACK`, `SETTLEMENT`, `FEE`, `INTEREST`.
+- **WorldView Scope**: Each actor sees only their own accounts, registered devices, public merchant directory, and global parameters (no other users' data, no full graph).
