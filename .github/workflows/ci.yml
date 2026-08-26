@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: finsim_test
+          POSTGRES_USER: finsim
+          POSTGRES_PASSWORD: finsim_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run lint-imports
+
+      - name: Type check
+        run: uv run mypy sim/
+
+      - name: Contract tests
+        run: uv run pytest -xvs -k contract_test
+
+      - name: Full test suite
+        run: uv run pytest -xvs
+        env:
+          DATABASE_URL: postgresql://finsim:finsim_test@localhost:5432/finsim_test

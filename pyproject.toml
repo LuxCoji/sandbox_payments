@@ -1,0 +1,130 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "finsim"
+version = "0.1.0"
+description = "Financial Digital Twin + Adversarial Testing Environment"
+requires-python = ">= 3.11"
+dependencies = [
+    "simpy",
+    "eventsourcing",
+    "numpy",
+    "pydantic",
+    "pydantic-settings",
+    "psycopg[binary]",
+    "networkx",
+    "torch-geometric",
+    "structlog",
+    "opentelemetry-api",
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp",
+    "prometheus-client",
+    "pymacaroons",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "black",
+    "mypy",
+    "import-linter",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["sim", "tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "SIM", "TCH"]
+
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.importlinter]
+root_package = "sim"
+
+[[tool.importlinter.contracts]]
+name = "Core does not import Population or Chrono implementations"
+type = "forbidden"
+source_modules = ["sim.core"]
+forbidden_modules = [
+    "sim.population.agents",
+    "sim.population.behaviour",
+    "sim.population.calibration",
+    "sim.population.profiles",
+    "sim.population.temporal",
+    "sim.chrono.store",
+    "sim.chrono.branch",
+    "sim.chrono.checkpoint",
+    "sim.chrono.replay",
+    "sim.chrono.hashing",
+]
+
+[[tool.importlinter.contracts]]
+name = "Population does not import Core or Chrono implementations"
+type = "forbidden"
+source_modules = ["sim.population"]
+forbidden_modules = [
+    "sim.core.engine",
+    "sim.core.payment",
+    "sim.core.account",
+    "sim.core.device",
+    "sim.core.gateway",
+    "sim.core.merchant",
+    "sim.core.settlement",
+    "sim.core.events",
+    "sim.chrono.store",
+    "sim.chrono.branch",
+    "sim.chrono.checkpoint",
+    "sim.chrono.replay",
+    "sim.chrono.hashing",
+]
+
+[[tool.importlinter.contracts]]
+name = "Chrono does not import Core or Population implementations"
+type = "forbidden"
+source_modules = ["sim.chrono"]
+forbidden_modules = [
+    "sim.core.engine",
+    "sim.core.payment",
+    "sim.core.account",
+    "sim.core.device",
+    "sim.core.gateway",
+    "sim.core.merchant",
+    "sim.core.settlement",
+    "sim.core.events",
+    "sim.population.agents",
+    "sim.population.behaviour",
+    "sim.population.calibration",
+    "sim.population.profiles",
+    "sim.population.temporal",
+]
+
+[[tool.importlinter.contracts]]
+name = "No direct simpy imports outside scheduler"
+type = "forbidden"
+source_modules = [
+    "sim.core",
+    "sim.population",
+    "sim.chrono",
+    "sim.gateway",
+    "sim.observability",
+]
+forbidden_modules = ["simpy"]
