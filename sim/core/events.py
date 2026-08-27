@@ -15,17 +15,15 @@ Envelope fields (common to all events):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from sim.core.interfaces import (
     AccountStatus,
     AccountType,
     DeviceStatus,
     DeviceType,
-    PaymentStatus,
     TransactionType,
 )
-
 
 # ── Base Envelope ─────────────────────────────────────────────────────────
 
@@ -240,3 +238,44 @@ class InterestAccrued(DomainEvent):
     amount_paise: int = 0
     rate_bps: int = 0
     period_ns: float = 0.0
+
+
+# ── Counter Events ────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class DailyCountersReset(DomainEvent):
+    account_id: str = ""
+    old_daily_tx_count: int = 0
+    old_daily_tx_volume_paise: int = 0
+
+
+# ── Rejection Events ─────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class PaymentTimeout(DomainEvent):
+    tx_id: str = ""
+    timeout_ns: float = 0.0
+
+
+@dataclass(frozen=True)
+class RefundRejected(DomainEvent):
+    tx_id: str = ""
+    requested_amount_paise: int = 0
+    total_already_refunded_paise: int = 0
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class TransferRejected(DomainEvent):
+    source_account_id: str = ""
+    target_account_id: str = ""
+    amount_paise: int = 0
+    reason_code: str = ""
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class AccountFreezeFailed(DomainEvent):
+    account_id: str = ""
+    current_status: AccountStatus = AccountStatus.ACTIVE
+    reason: str = ""

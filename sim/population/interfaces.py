@@ -5,13 +5,11 @@ CalibratedParams, and the BehaviourModel protocol.
 """
 from __future__ import annotations
 
-import enum
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from sim.core.interfaces import TransactionType, WorldView
-
 if TYPE_CHECKING:
+    from sim.core.interfaces import TransactionType, WorldView
     from sim.scheduler.rng import DeterministicRNG
 
 

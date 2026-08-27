@@ -34,7 +34,7 @@ class AccountStatus(enum.Enum):
 
 class TransactionType(enum.Enum):
     """All action/transaction types in the system.
-    
+
     Flows:
         PAYMENT:     User → Merchant (via gateway)
         TRANSFER:    Account → Account (peer-to-peer)
@@ -61,7 +61,7 @@ class TransactionType(enum.Enum):
 
 class PaymentStatus(enum.Enum):
     """Payment lifecycle states.
-    
+
     State machine:
         INITIATED → AUTHORIZED → CAPTURED → SETTLED → COMPLETED
                   ↘ DECLINED
@@ -82,7 +82,7 @@ class PaymentStatus(enum.Enum):
 
 class ActorRole(enum.Enum):
     """Roles determine visibility and capability grants.
-    
+
     Visibility rules:
         USER:          Own accounts + public merchant directory
         MERCHANT:      Own accounts + payer pseudonymous IDs
@@ -217,6 +217,13 @@ class Command:
     metadata: dict[str, object] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class CommandResult:
+    """Result of executing a command against the engine."""
+    events: tuple[DomainEvent, ...]
+    success: bool
+
+
 # ── Protocol ──────────────────────────────────────────────────────────────
 
 @runtime_checkable
@@ -229,14 +236,16 @@ class WorldEngine(Protocol):
     via domain events through the apply_event pipeline.
     """
 
-    def get_world_view(self, actor_id: str, actor_role: ActorRole) -> WorldView:
+    def get_world_view(
+        self, actor_id: str, actor_role: ActorRole, offset: int = 0, limit: int = 1000
+    ) -> WorldView:
         """Build an immutable WorldView for the given actor.
 
         Applies field-level masking based on role permissions.
         """
         ...
 
-    def execute_command(self, command: Command) -> list[DomainEvent]:
+    def execute_command(self, command: Command) -> CommandResult:
         """Validate command against current aggregate state, emit domain events.
 
         1. Validate command against current aggregates (balance, limits, status).

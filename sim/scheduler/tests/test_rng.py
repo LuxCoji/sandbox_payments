@@ -1,8 +1,6 @@
 """Unit tests for DeterministicRNG."""
 from __future__ import annotations
 
-import pytest
-
 from sim.scheduler.rng import DeterministicRNG
 
 

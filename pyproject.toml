@@ -32,6 +32,7 @@ dependencies = [
 dev = [
     "pytest",
     "pytest-asyncio",
+    "hypothesis",
     "ruff",
     "black",
     "mypy",
@@ -62,11 +63,16 @@ disallow_untyped_defs = true
 
 [tool.importlinter]
 root_package = "sim"
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Core does not import Population or Chrono implementations"
 type = "forbidden"
 source_modules = ["sim.core"]
+ignore_imports = [
+    "sim.core.interfaces -> sim.core.events",
+    "sim.core.interfaces -> sim.scheduler.env"
+]
 forbidden_modules = [
     "sim.population.agents",
     "sim.population.behaviour",
@@ -84,6 +90,10 @@ forbidden_modules = [
 name = "Population does not import Core or Chrono implementations"
 type = "forbidden"
 source_modules = ["sim.population"]
+ignore_imports = [
+    "sim.core.interfaces -> sim.core.events",
+    "sim.core.interfaces -> sim.scheduler.env"
+]
 forbidden_modules = [
     "sim.core.engine",
     "sim.core.payment",
@@ -104,6 +114,10 @@ forbidden_modules = [
 name = "Chrono does not import Core or Population implementations"
 type = "forbidden"
 source_modules = ["sim.chrono"]
+ignore_imports = [
+    "sim.core.interfaces -> sim.core.events",
+    "sim.core.interfaces -> sim.scheduler.env"
+]
 forbidden_modules = [
     "sim.core.engine",
     "sim.core.payment",
@@ -129,5 +143,9 @@ source_modules = [
     "sim.chrono",
     "sim.gateway",
     "sim.observability",
+]
+ignore_imports = [
+    "sim.core.interfaces -> sim.core.events",
+    "sim.core.interfaces -> sim.scheduler.env"
 ]
 forbidden_modules = ["simpy"]

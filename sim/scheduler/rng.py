@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import hashlib
 import pickle
-from typing import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.random import Generator, SeedSequence
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class DeterministicRNG:
@@ -64,7 +67,7 @@ class DeterministicRNG:
             A new DeterministicRNG with a deterministically derived seed.
         """
         # Derive a deterministic seed from the parent seed + entity key
-        key = f"{entity_type}:{entity_id}".encode("utf-8")
+        key = f"{entity_type}:{entity_id}".encode()
         parent_entropy = self._seed_seq.entropy
         # Combine parent entropy with entity key via SHA-256
         h = hashlib.sha256()
