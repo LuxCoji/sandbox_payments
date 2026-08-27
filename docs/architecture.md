@@ -8,17 +8,17 @@ FinSim is a deterministic, event-sourced financial digital twin designed for pay
 
 As established in `initial_plan.md`, the platform is divided across three parallel contributors:
 
-```
-+-----------------------------------------------------------------------------+
-|                               CONTRIBUTOR MAP                               |
-+-------------------------------+-----------------------------+---------------+
-|           Person 1            |          Person 2           |   Person 3    |
-+-------------------------------+-----------------------------+---------------+
-| * Core Engine (sim/core/)     | * Population (sim/pop/)     | * ChronoDAG   |
-| * Gateway (sim/gateway/)      | * PaySim Calibration        | * Hashing     |
-| * Scheduler (sim/scheduler/)  | * Behaviour Model           | * Obs         |
-| * Repo, Config, CI            | * Agent Profiles & Temporal | * Tests       |
-+-------------------------------+-----------------------------+---------------+
+```text
++---------------------------------------------------------------------------------------------+
+|                                      CONTRIBUTOR MAP                                        |
++-------------------------------+-----------------------------+---------------+---------------+
+|           Person 1            |          Person 2           |   Person 3    |   Person 4    |
++-------------------------------+-----------------------------+---------------+---------------+
+| * Core Engine (sim/core/)     | * Population (sim/pop/)     | * ChronoDAG   | * API Proxy   |
+| * Gateway (sim/gateway/)      | * PaySim Calibration        | * Hashing     | * Web UI      |
+| * Scheduler (sim/scheduler/)  | * Behaviour Model           | * Obs         |               |
+| * Repo, Config, CI            | * Agent Profiles & Temporal | * Tests       |               |
++-------------------------------+-----------------------------+---------------+---------------+
 ```
 
 ### Current Status
@@ -35,6 +35,8 @@ As established in `initial_plan.md`, the platform is divided across three parall
 | **Chrono Contracts** | `sim/chrono/interfaces.py` | Defined (Contracts) |
 | **Chrono Implementation** | `sim/chrono/*.py` | Implemented (PostgreSQL-backed) |
 | **Observability** | `sim/observability/*.py` | Implemented — traces/metrics wired to key entrypoints, exported to Grafana Cloud |
+| **API Backend** | `api/` | Implemented — FastAPI proxy for WebSockets and state queries |
+| **Web UI** | `frontend/` | Implemented — React/Vite dashboard for visualization |
 
 ---
 

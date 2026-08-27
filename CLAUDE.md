@@ -32,6 +32,12 @@ uv run python -m sim.main replay-branch --branch main --to-event 5000
 uv run python -m sim.main diff-branches --branch-a main --branch-b red-team --event 5000
 ```
 
+To run the Web UI and API for real-time monitoring:
+```bash
+uv run uvicorn api.main:app --reload --port 8000 # API Server
+cd frontend && npm run dev                       # Vite Frontend
+```
+
 Requires `.env` with `FINSIM_DB_URL` (Postgres — Supabase in practice, not local docker) for anything that touches ChronoDAG; `OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_EXPORTER_OTLP_HEADERS` are optional (Grafana Cloud). No local docker-compose stack — that was removed.
 
 ## Architecture
@@ -39,6 +45,10 @@ Requires `.env` with `FINSIM_DB_URL` (Postgres — Supabase in practice, not loc
 ### Subsystem boundaries (enforced by import-linter, not just convention)
 
 Five subsystems under `sim/`: `core` (engine, accounts, payments), `population` (agent behaviour, calibration), `chrono` (branch-aware event store), `gateway` (capability-gated tool API), `scheduler` (RNG + discrete-event queue, shared by all). Plus `observability` (tracing/metrics/logging), importable by everyone, imports nothing subsystem-specific.
+
+Additionally, there are two outer layers:
+- `api/`: FastAPI proxy that wraps `sim/` components and provides a WebSocket stream for the UI. (Not a simulation subsystem, imports `sim` but `sim` never imports `api`).
+- `frontend/`: React/Vite web UI for real-time dashboarding.
 
 **Cross-subsystem imports may only target `sim/<subsystem>/interfaces.py`** — never a concrete module (`sim.core.engine`, `sim.chrono.store`, etc.) from another subsystem. `make lint`'s `lint-imports` step enforces this via 5 contracts in `pyproject.toml`'s `[tool.importlinter]` and will fail the build on any violation. When adding a field/method that crosses a subsystem boundary, add it to that subsystem's `interfaces.py` first.
 

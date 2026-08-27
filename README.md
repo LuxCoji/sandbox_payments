@@ -93,6 +93,20 @@ make run
 make regress      # deterministic regression suite against baselines/hashes.json
 ```
 
+### 6. Run the Web UI & API
+
+FinSim includes a FastAPI backend and a React/Vite frontend for real-time simulation monitoring.
+
+```bash
+# Terminal 1: Start the API server
+uv run uvicorn api.main:app --reload --port 8000
+
+# Terminal 2: Start the frontend UI
+cd frontend
+npm install
+npm run dev
+```
+
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for the full system design,
@@ -101,7 +115,9 @@ See [docs/architecture.md](docs/architecture.md) for the full system design,
 
 ## Project Structure
 
-```
+```text
+api/               # FastAPI proxy layer connecting frontend to engine
+frontend/          # React/Vite Web UI for simulation monitoring
 sim/
 ├── core/          # Payment engine, accounts, settlements (Person 1)
 ├── population/    # Agent behaviour, calibration, profiles (Person 2)
