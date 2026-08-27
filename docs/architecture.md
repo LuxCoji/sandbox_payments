@@ -31,14 +31,66 @@ As established in `initial_plan.md`, the platform is divided across three parall
 | **Gateway Contracts** | `sim/gateway/interfaces.py` | Defined (Contracts) |
 | **Gateway Implementation** | `sim/gateway/registry.py`, `sim/gateway/policy.py` | Pending (Person 1) |
 | **Population Contracts** | `sim/population/interfaces.py` | Defined (Contracts) |
-| **Population Implementation** | `sim/population/*.py`, `scripts/calibrate.py` | Pending (Person 2) |
+| **Population Implementation** | `sim/population/*.py`, `scripts/calibrate.py` | **Implemented (10 tests passing, Person 2)** |
 | **Chrono Contracts** | `sim/chrono/interfaces.py` | Defined (Contracts) |
 | **Chrono Implementation** | `sim/chrono/*.py` | Pending (Person 3) |
 | **Observability** | `sim/observability/*.py` | Pending (Person 3) |
 
 ---
 
-## 2. State & Event Causality Model (CQRS)
+## 2. Population Subsystem Architecture (Person 2)
+
+The population subsystem drives realistic behavioral activity in the discrete-event simulation:
+
+```
+data/paysim/ (CSVs)
+      │
+      ▼ (scripts/download_data.py & scripts/calibrate.py)
+data/paysim/calibrated_params.json (CalibratedParams)
+      │
+      ├──► sim/population/profiles.py (ProfileSampler: lognormal amounts, repetition counts, balances)
+      ├──► sim/population/temporal.py (TemporalModel: 24×7 diurnal rate matrices, Poisson inter-arrivals)
+      │
+      ▼
+sim/population/behaviour.py (PopulationBehaviourModel: WorldView ──► Intent stream)
+      │
+      ▼
+sim/population/agents.py (PopulationManager: batch entity spawning, public merchant directory)
+```
+
+### Implemented Modules
+
+1. **`sim/population/calibration.py` & `scripts/calibrate.py`**:
+   - Parses the 5 canonical PaySim CSVs (`clientsProfiles.csv`, `aggregatedTransactions.csv`, `initialBalancesDistribution.csv`, `maxOccurrencesPerClient.csv`, `transactionsTypes.csv`).
+   - Converts currency into integer paise (`₹1.00 = 100 paise`).
+   - Serializes/deserializes strongly-typed `CalibratedParams` to JSON.
+
+2. **`sim/population/profiles.py` (`ProfileSampler`)**:
+   - Samples action profiles weighted by empirical frequencies.
+   - Samples lognormal transaction amounts in paise derived from arithmetic mean and standard deviation:
+     $$\mu_{\ln} = \ln\left(\frac{\mu^2}{\sqrt{\mu^2 + \sigma^2}}\right), \quad \sigma_{\ln} = \sqrt{\ln\left(1 + \frac{\sigma^2}{\mu^2}\right)}$$
+   - Samples piecewise initial balances and merchant category codes (MCC).
+
+3. **`sim/population/temporal.py` (`TemporalModel`)**:
+   - Maps discrete simulation nanoseconds (`sim_time_ns`) to `(day_of_week, hour_of_day)`.
+   - Samples non-homogeneous Poisson process inter-arrival delays $\Delta t_{\text{ns}} \sim \text{Exp}(\lambda)$ where $\lambda$ is obtained from the $24 \times 7$ rate matrix.
+
+4. **`sim/population/behaviour.py` (`PopulationBehaviourModel`)**:
+   - Implements the `BehaviourModel` protocol.
+   - Applies the **Balance-Spring Dynamic**: higher available balances increase outflow probabilities (`PAYMENT`, `TRANSFER`, `CASH_OUT`), while lower balances suppress outflows and favor inflows (`CASH_IN`, `DEBIT`). Zero balance produces zero outflows.
+   - Generates deterministic UUIDv7 `idempotency_key` strings for 100% reproducible intent streams.
+
+5. **`sim/population/agents.py` (`PopulationManager`)**:
+   - Batch initializes `AgentEntity` records for retail users and merchants.
+   - Generates public `MerchantDirectoryEntry` tuples for user world-views.
+
+6. **Test Suites (`sim/population/tests/`)**:
+   - `contract_test_population.py`: Protocol adherence, intent shape contracts, WorldView scope immutability, balance-spring dynamic, deterministic seed reproducibility, serialization fidelity, and strict import isolation.
+   - `test_behaviour.py` & `test_agents.py`: Unit tests for profile sampling and agent management.
+
+---
+
+## 3. State & Event Causality Model (CQRS)
 
 FinSim follows an event-sourced state transition model:
 
@@ -63,7 +115,7 @@ apply_event (in-memory state projection updated: State' = Apply(State, Event))
 
 ---
 
-## 3. Boundary Rules & Import Isolation
+## 4. Boundary Rules & Import Isolation
 
 Configured in `pyproject.toml` and enforced via `import-linter` in CI:
 
@@ -74,7 +126,7 @@ Configured in `pyproject.toml` and enforced via `import-linter` in CI:
 
 ---
 
-## 4. Key Design Decisions
+## 5. Key Design Decisions
 
 - **Currency**: INR only, represented as integer paise (`₹1.00 = 100 paise`).
 - **Identifiers**: UUIDv7 time-ordered strings.
