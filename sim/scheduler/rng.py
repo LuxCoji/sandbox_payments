@@ -121,7 +121,7 @@ class DeterministicRNG:
             seq: Sequence to choose from.
             p: Optional probability weights (must sum to 1.0).
         """
-        idx = self._generator.choice(len(seq), p=p)  # type: ignore[arg-type]
+        idx = self._generator.choice(len(seq), p=p)
         return seq[int(idx)]
 
     def shuffle(self, seq: list[object]) -> None:
