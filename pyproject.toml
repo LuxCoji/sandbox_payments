@@ -26,6 +26,7 @@ dependencies = [
     "prometheus-client",
     "pymacaroons",
     "pyyaml",
+    "python-dotenv>=1.2.3",
 ]
 
 [project.optional-dependencies]

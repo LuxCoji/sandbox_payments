@@ -103,6 +103,9 @@ def main() -> None:
     
     args = parser.parse_args()
     
+    from dotenv import load_dotenv
+    load_dotenv()
+    
     # Boot Observability (Traces, Metrics, Logs)
     setup_tracing("finsim.runner")
     start_metrics_server(args.metrics_port)

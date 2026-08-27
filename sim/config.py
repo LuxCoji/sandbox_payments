@@ -24,7 +24,7 @@ class SimConfig(BaseSettings):
 
     config_file: Path = Path("config.yaml")
 
-    model_config = {"env_prefix": "FINSIM_"}
+    model_config = {"env_prefix": "FINSIM_", "env_file": ".env"}
 
     @classmethod
     def from_yaml(cls, path: Path | None = None) -> SimConfig:
