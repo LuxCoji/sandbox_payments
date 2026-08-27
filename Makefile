@@ -1,10 +1,4 @@
-.PHONY: up down test test-contract test-integration lint typecheck calibrate run regress install
-
-up:
-	docker compose up -d
-
-down:
-	docker compose down
+.PHONY: test test-contract test-integration lint typecheck calibrate run regress install
 
 test:
 	uv run pytest -xvs
