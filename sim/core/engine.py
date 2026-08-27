@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sim.core.account import Account
 from sim.core.device import Device
@@ -175,7 +175,7 @@ class WorldEngineImpl:
         self._seq_num += 1
         return self._seq_num
 
-    def _create_event(self, event_class, **kwargs):
+    def _create_event(self, event_class: type[Any], **kwargs: Any) -> Any:
         return event_class(
             event_id=self._next_event_id(),
             event_type=event_class.__name__,
@@ -196,18 +196,23 @@ class WorldEngineImpl:
             self._payments[event.tx_id] = Payment(event)
             # if auto capture, apply it here so we have the aggregate created
 
-        # Route to appropriate aggregate
-        if hasattr(event, "account_id") and event.account_id in self._accounts:
-            self._accounts[event.account_id].apply_event(event)
-        if hasattr(event, "tx_id") and event.tx_id in self._payments:
-            self._payments[event.tx_id].apply_event(event)
+        account_id = getattr(event, "account_id", None)
+        if account_id and account_id in self._accounts:
+            self._accounts[account_id].apply_event(event)
+            
+        tx_id = getattr(event, "tx_id", None)
+        if tx_id and tx_id in self._payments:
+            self._payments[tx_id].apply_event(event)
 
         # Handle specific events that affect multiple entities or require special logic
         if isinstance(event, (AccountCredited, AccountDebited, TransferRejected)):
-            if hasattr(event, "source_account_id") and event.source_account_id in self._accounts:
-                self._accounts[event.source_account_id].apply_event(event)
-            if hasattr(event, "target_account_id") and event.target_account_id in self._accounts:
-                self._accounts[event.target_account_id].apply_event(event)
+            src_id = getattr(event, "source_account_id", None)
+            if src_id and src_id in self._accounts:
+                self._accounts[src_id].apply_event(event)
+                
+            tgt_id = getattr(event, "target_account_id", None)
+            if tgt_id and tgt_id in self._accounts:
+                self._accounts[tgt_id].apply_event(event)
 
     def _apply_events(self, events: list[DomainEvent]) -> None:
         for event in events:
@@ -218,7 +223,7 @@ class WorldEngineImpl:
 
     # Handlers
     def _execute_transfer(self, command: Command) -> list[DomainEvent]:
-        events = []
+        events: list[DomainEvent] = []
         if not command.source_account_id or not command.target_account_id:
             return events
 
@@ -265,7 +270,7 @@ class WorldEngineImpl:
         return events
 
     def _execute_payment(self, command: Command) -> list[DomainEvent]:
-        events = []
+        events: list[DomainEvent] = []
         tx_id = str(uuid.uuid4())
         events.append(self._create_event(
             PaymentRequested, actor_id=command.actor_id, tx_id=tx_id,
