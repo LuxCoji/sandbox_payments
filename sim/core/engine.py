@@ -296,13 +296,75 @@ class WorldEngineImpl:
         return events
 
     def _execute_cash_in(self, command: Command) -> list[DomainEvent]:
-        return []
+        events: list[DomainEvent] = []
+        if not command.target_account_id:
+            return events
+
+        dst = self._accounts.get(command.target_account_id)
+        if not dst:
+            return events
+
+        tx_id = str(uuid.uuid4())
+        events.append(self._create_event(
+            AccountCredited, actor_id=command.actor_id,
+            account_id=dst.account_id, amount_paise=command.amount_paise,
+            tx_id=tx_id, reason="Cash in"
+        ))
+        return events
 
     def _execute_cash_out(self, command: Command) -> list[DomainEvent]:
-        return []
+        events: list[DomainEvent] = []
+        if not command.source_account_id:
+            return events
+
+        src = self._accounts.get(command.source_account_id)
+        if not src:
+            return events
+
+        reason = src.can_debit(command.amount_paise)
+        if reason:
+            events.append(self._create_event(
+                TransferRejected, actor_id=command.actor_id,
+                source_account_id=src.account_id, target_account_id="CASH_ENTITY",
+                amount_paise=command.amount_paise, reason_code="DEBIT_REJECTED", detail=reason
+            ))
+            return events
+
+        limit_reason = src.check_daily_limit(command.amount_paise, self.sim_time_ns)
+        if limit_reason:
+            events.append(self._create_event(
+                TransferRejected, actor_id=command.actor_id,
+                source_account_id=src.account_id, target_account_id="CASH_ENTITY",
+                amount_paise=command.amount_paise, reason_code="LIMIT_EXCEEDED", detail=limit_reason
+            ))
+            return events
+
+        tx_id = str(uuid.uuid4())
+        events.append(self._create_event(
+            AccountDebited, actor_id=command.actor_id,
+            account_id=src.account_id, amount_paise=command.amount_paise,
+            tx_id=tx_id, reason="Cash out"
+        ))
+        return events
 
     def _execute_debit(self, command: Command) -> list[DomainEvent]:
-        return []
+        # DEBIT: External -> Account (inflow, e.g. salary, ACH pull)
+        events: list[DomainEvent] = []
+        if not command.target_account_id:
+            return events
+
+        dst = self._accounts.get(command.target_account_id)
+        if not dst:
+            return events
+
+        tx_id = str(uuid.uuid4())
+        events.append(self._create_event(
+            AccountCredited, actor_id=command.actor_id,
+            account_id=dst.account_id, amount_paise=command.amount_paise,
+            tx_id=tx_id, reason="External debit/inflow"
+        ))
+        return events
 
     def _execute_refund(self, command: Command) -> list[DomainEvent]:
-        return []
+        # REFUND: Merchant (source) -> User (target)
+        return self._execute_transfer(command)

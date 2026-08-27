@@ -10,15 +10,43 @@ logger = get_logger("finsim.cli")
 def run_seed(args: argparse.Namespace) -> None:
     logger.info("Initializing simulation...", seed=args.seed, users=args.users)
     
-    # Initialize the DAG and ensure schema is ready
-    dag = PostgresChronoDAG(args.db_url)
+    from sim.config import SimConfig
+    from sim.main import build_simulation
+    from sim.population.agents import PopulationManager
+    from sim.population.calibration import calibrate_from_csv
+    from sim.population.behaviour import PopulationBehaviourModel
+    import os
+
+    config = SimConfig(
+        seed=args.seed, 
+        num_users=args.users, 
+        sim_duration_days=max(1, int(args.duration_hours / 24)),
+        db_url=args.db_url
+    )
     
-    # [!] Placeholder: Engine instantiation will go here once Person 1 writes `sim.main`.
-    # engine = WorldEngine(dag, seed=args.seed)
-    # population = PopulationManager(engine, args.users)
-    # engine.run(until=args.duration_hours * 3600 * 1e9)
+    engine, gateway, dag = build_simulation(config)
     
-    logger.info("Simulation finished (placeholder: waiting on WorldEngine implementation)")
+    # Initialize Population
+    data_dir = os.path.join(os.path.dirname(__file__), "..", "data", "paysim")
+    try:
+        params = calibrate_from_csv(data_dir)
+    except FileNotFoundError:
+        # Fallback if csvs not generated
+        from sim.population.interfaces import CalibratedParams
+        params = CalibratedParams({}, [], {}, {}, {})
+        
+    behaviour_model = PopulationBehaviourModel(params, engine._rng)
+    population = PopulationManager(behaviour_model, engine._rng)
+    
+    population.create_population(num_users=args.users, num_merchants=max(1, args.users // 10))
+    population.start_agent_loops(engine)
+    
+    # Run simulation
+    engine._env.run(until=args.duration_hours * 3600 * 1e9)
+    
+    logger.info("Simulation finished", 
+                final_hash=engine.get_state_hash(),
+                step_count=engine._env.step_count)
 
 
 def fork_branch(args: argparse.Namespace) -> None:

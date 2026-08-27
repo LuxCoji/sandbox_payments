@@ -130,3 +130,59 @@ class PopulationManager:
             )
             for m in self._merchants
         )
+
+    def start_agent_loops(self, engine: Any) -> None:
+        """Schedule the initial action loop for all user agents."""
+        from sim.scheduler.env import ScheduledEvent
+        from sim.core.interfaces import TransactionType
+
+        for user in self._users:
+            dt = self._behaviour_model.get_next_interarrival(
+                user.entity_id, TransactionType.PAYMENT, engine.sim_time_ns
+            )
+            engine.schedule_event(ScheduledEvent(
+                time_ns=engine.sim_time_ns + dt,
+                handler=self._agent_step,
+                payload={"engine": engine, "agent_id": user.entity_id, "role": user.role},
+                description=f"Agent {user.entity_id} step"
+            ))
+
+    def _agent_step(self, engine: Any, agent_id: str, role: ActorRole) -> None:
+        """Execute one step of an agent's behaviour and schedule the next."""
+        from sim.core.interfaces import Command, TransactionType
+        from sim.scheduler.env import ScheduledEvent
+        import uuid
+
+        # 1. Observe the world
+        world_view = engine.get_world_view(actor_id=agent_id, actor_role=role)
+
+        # 2. Propose actions (Intents)
+        intents = self._behaviour_model.propose_actions(agent_id, world_view)
+
+        # 3. Execute actions (convert Intent to Command)
+        for intent in intents:
+            cmd = Command(
+                command_id=str(uuid.uuid4()),
+                actor_id=intent.actor_id,
+                action_type=intent.action_type,
+                source_account_id=world_view.accounts[0].account_id if world_view.accounts else None,
+                target_account_id=intent.target_id,
+                amount_paise=intent.amount_paise,
+                idempotency_key=intent.idempotency_key,
+                device_id=intent.device_id,
+                gateway_hint=intent.gateway_hint,
+                metadata=intent.metadata,
+            )
+            # In a full run, we might use Gateway, but Engine is direct here
+            engine.execute_command(cmd)
+
+        # 4. Schedule next step
+        dt = self._behaviour_model.get_next_interarrival(
+            agent_id, TransactionType.PAYMENT, engine.sim_time_ns
+        )
+        engine.schedule_event(ScheduledEvent(
+            time_ns=engine.sim_time_ns + dt,
+            handler=self._agent_step,
+            payload={"engine": engine, "agent_id": agent_id, "role": role},
+            description=f"Agent {agent_id} step"
+        ))

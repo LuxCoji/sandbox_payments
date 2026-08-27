@@ -29,27 +29,40 @@ def run_regression() -> None:
     logger.info("Starting deterministic regression test harness")
     
     baselines = load_baselines()
-    
-    # [!] Placeholder: 
-    # Once Person 1 finishes WorldEngine, we will loop over a matrix of seeds,
-    # boot a headless simulation, and run it for 10,000 events.
-    # We will then extract the final `state_hash` and compare it to `baselines[str(seed)]`.
-    
-    # Example logic that will be uncommented:
-    """
     failed = 0
     seeds_to_test = [42, 100, 999]
-    dag = PostgresChronoDAG("postgresql://postgres:postgres@localhost:5432/finsim")
+    db_url = "postgresql://postgres:postgres@localhost:5432/finsim"
     
+    from sim.config import SimConfig
+    from sim.main import build_simulation
+    from sim.population.agents import PopulationManager
+    from sim.population.calibration import calibrate_from_csv
+    from sim.population.behaviour import PopulationBehaviourModel
+    import os
+
+    data_dir = os.path.join(os.path.dirname(__file__), "..", "data", "paysim")
+    try:
+        params = calibrate_from_csv(data_dir)
+    except FileNotFoundError:
+        # Fallback if csvs not generated
+        from sim.population.interfaces import CalibratedParams
+        params = CalibratedParams({}, [], {}, {}, {})
+        
     for seed in seeds_to_test:
         logger.info("Testing seed", seed=seed)
         
-        # 1. Run simulation
-        # engine = WorldEngine(dag, seed=seed)
-        # engine.run_events(10000)
-        # current_hash = engine.get_state_hash()
+        # 1. Boot simulation
+        config = SimConfig(seed=seed, num_users=100, sim_duration_days=1.0, db_url=db_url)
+        engine, gateway, dag = build_simulation(config)
         
-        current_hash = "mock_hash_for_now" 
+        behaviour_model = PopulationBehaviourModel(params, engine._rng)
+        population = PopulationManager(behaviour_model, engine._rng)
+        population.create_population(num_users=100, num_merchants=10)
+        population.start_agent_loops(engine)
+        
+        # Run simulation for a fixed number of events or fixed time (e.g., 24 hours)
+        engine._env.run(until=24 * 3600 * 1e9)
+        current_hash = engine.get_state_hash()
         
         if str(seed) not in baselines:
             logger.info("New baseline recorded", seed=seed, hash=current_hash)
@@ -67,9 +80,8 @@ def run_regression() -> None:
     if failed > 0:
         logger.error("Regression suite failed", failed_count=failed)
         sys.exit(1)
-    """
-    
-    logger.info("Regression suite complete (standing by for core engine implementation).")
+        
+    logger.info("Regression suite complete.")
 
 
 if __name__ == "__main__":
