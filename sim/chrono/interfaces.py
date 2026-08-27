@@ -101,7 +101,16 @@ class ChronoDAG(Protocol):
         """Append an event to the current branch log."""
         ...
 
-    def create_checkpoint(self, branch_id: str, event_number: int) -> Checkpoint:
+    def create_checkpoint(
+        self,
+        branch_id: str,
+        event_number: int,
+        sim_time_ns: float,
+        state_hash: str,
+        aggregate_snapshot: bytes,
+        rng_state: bytes,
+        metadata: dict[str, object] | None = None,
+    ) -> Checkpoint:
         """Capture state snapshot at the given event number.
 
         Includes:
