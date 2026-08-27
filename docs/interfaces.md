@@ -12,7 +12,7 @@ This document is the **single source of truth** for all contracts, data shapes, 
 4. **State & Event Causality (CQRS)**: In-memory aggregate projections are read-only to external callers and are mutated strictly by applying emitted `DomainEvent` instances via event handlers (`apply_event`).
 5. **Types & Units**:
    - Currency: **INR only**, with all amounts represented as integer **paise** (`₹1.00 = 100 paise`).
-   - Identifiers: **UUIDv7 strings** (time-ordered, 36-character format).
+   - Identifiers: **UUIDv4 strings** (36-character format).
    - Simulation Time: Represented as nanoseconds (`sim_time_ns: float`).
 
 ---
@@ -159,13 +159,21 @@ class Command:
     metadata: dict[str, object] = field(default_factory=dict)
 ```
 
+### `CommandResult` (frozen)
+```python
+@dataclass(frozen=True)
+class CommandResult:
+    events: tuple[DomainEvent, ...]
+    success: bool
+```
+
 ---
 
 ### Protocol: `WorldEngine`
 
 Defined in `sim/core/interfaces.py`:
-- `get_world_view(actor_id: str, actor_role: ActorRole) -> WorldView`: Generates role-masked state snapshot.
-- `execute_command(command: Command) -> list[DomainEvent]`: Validates against in-memory aggregates, generates domain events, saves to ChronoDAG, and applies events to update state.
+- `get_world_view(actor_id: str, actor_role: ActorRole, offset: int = 0, limit: int = 1000) -> WorldView`: Generates role-masked state snapshot.
+- `execute_command(command: Command) -> CommandResult`: Validates against in-memory aggregates, generates domain events, and applies events to update state.
 - `schedule_event(event: ScheduledEvent) -> None`: Submits a future event to the scheduler.
 - `get_state_hash() -> str`: Computes deterministic SHA-256 state hash.
 - `sim_time_ns -> float`: Read-only property returning current simulation nanoseconds.
@@ -189,13 +197,14 @@ class DomainEvent:
 ```
 
 ### Event Types
-- **Account Events**: `AccountCreated`, `AccountCredited`, `AccountDebited`, `AccountFrozen`, `AccountClosed`, `AccountStatusChanged`, `KycLevelChanged`
-- **Payment Events**: `PaymentRequested`, `PaymentAuthorized`, `PaymentDeclined`, `PaymentCaptured`, `PaymentSettled`, `PaymentCompleted`, `PaymentRefunded`, `PaymentVoided`, `PaymentChargedBack`
+- **Account Events**: `AccountCreated`, `AccountCredited`, `AccountDebited`, `AccountFrozen`, `AccountClosed`, `AccountStatusChanged`, `KycLevelChanged`, `AccountFreezeFailed`
+- **Payment Events**: `PaymentRequested`, `PaymentAuthorized`, `PaymentDeclined`, `PaymentCaptured`, `PaymentSettled`, `PaymentCompleted`, `PaymentRefunded`, `PaymentVoided`, `PaymentChargedBack`, `PaymentTimeout`
 - **Device Events**: `DeviceRegistered`, `DeviceStatusChanged`
 - **Merchant Events**: `MerchantOnboarded`, `MerchantSuspended`
 - **Gateway Events**: `GatewayStatusChanged`
 - **Settlement Events**: `SettlementBatchCreated`, `SettlementBatchCompleted`
 - **Fee & Interest Events**: `FeeCharged`, `InterestAccrued`
+- **Rejection/Counter Events**: `TransferRejected`, `RefundRejected`, `DailyCountersReset`
 
 ---
 
