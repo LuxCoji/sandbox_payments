@@ -157,6 +157,7 @@ class DeterministicRNG:
         self._seed_seq = SeedSequence(
             entropy=data["seed_seq_entropy"],
             spawn_key=data["seed_seq_spawn_key"],
+            n_children_spawned=data["seed_seq_n_children"],
         )
 
     def __repr__(self) -> str:

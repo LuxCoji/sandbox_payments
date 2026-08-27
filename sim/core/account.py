@@ -100,11 +100,12 @@ class Account:
         return base * multiplier
 
     def check_daily_limit(self, amount_paise: int, sim_time_ns: float) -> str | None:
-        self._maybe_reset_daily_counters(sim_time_ns, dry_run=True)
         limit = self.daily_limit_paise()
         if limit is None:
             return None
-        if self.daily_tx_volume_paise + amount_paise > limit:
+        current_day = int(sim_time_ns // NANOS_PER_DAY)
+        simulated_volume = 0 if current_day > self.last_tx_day else self.daily_tx_volume_paise
+        if simulated_volume + amount_paise > limit:
             return f"Exceeds daily limit of {limit}"
         return None
 
@@ -126,9 +127,6 @@ class Account:
         current_day = int(sim_time_ns // NANOS_PER_DAY)
         if current_day > self.last_tx_day:
             if dry_run:
-                self.daily_tx_count = 0
-                self.daily_tx_volume_paise = 0
-                self.last_tx_day = current_day
                 return None
 
             return DailyCountersReset(

@@ -151,19 +151,20 @@ class PopulationManager:
         )
 
     def start_agent_loops(self, engine: Any) -> None:
-        """Schedule the initial action loop for all user agents."""
+        """Schedule the initial action loop for all user and merchant agents."""
         from sim.scheduler.env import ScheduledEvent
         from sim.core.interfaces import TransactionType
 
-        for user in self._users:
+        pop_size = len(self._users) + len(self._merchants)
+        for agent in self._users + self._merchants:
             dt = self._behaviour_model.get_next_interarrival(
-                user.entity_id, TransactionType.PAYMENT, engine.sim_time_ns
+                agent.entity_id, TransactionType.PAYMENT, engine.sim_time_ns, pop_size
             )
             engine.schedule_event(ScheduledEvent(
                 time_ns=engine.sim_time_ns + dt,
                 handler=self._agent_step,
-                payload={"engine": engine, "agent_id": user.entity_id, "role": user.role},
-                description=f"Agent {user.entity_id} step"
+                payload={"engine": engine, "agent_id": agent.entity_id, "role": agent.role},
+                description=f"Agent {agent.entity_id} step"
             ))
 
     def _agent_step(self, engine: Any, agent_id: str, role: ActorRole) -> None:
@@ -196,8 +197,9 @@ class PopulationManager:
             engine.execute_command(cmd)
 
         # 4. Schedule next step
+        pop_size = len(self._users) + len(self._merchants)
         dt = self._behaviour_model.get_next_interarrival(
-            agent_id, TransactionType.PAYMENT, engine.sim_time_ns
+            agent_id, TransactionType.PAYMENT, engine.sim_time_ns, pop_size
         )
         engine.schedule_event(ScheduledEvent(
             time_ns=engine.sim_time_ns + dt,

@@ -13,27 +13,39 @@ class RateLimiter:
     """Simple per-actor per-tool counters."""
 
     def __init__(self) -> None:
-        # (actor_id, tool_name, period) -> count
-        self._counters: dict[tuple[str, str, int], int] = {}
+        self._step_counters: dict[tuple[str, str], int] = {}
+        self._day_counters: dict[tuple[str, str], int] = {}
+        self._current_step_time: int = -1
+        self._current_day: int = -1
 
     def check_and_increment(
         self, actor_id: str, tool_name: str, sim_time_ns: float,
         limit_per_step: int | None, limit_per_day: int | None,
     ) -> str | None:
+        
+        current_step = int(sim_time_ns)
+        if current_step != self._current_step_time:
+            self._step_counters.clear()
+            self._current_step_time = current_step
+
+        current_day = int(sim_time_ns // NANOS_PER_DAY)
+        if current_day != self._current_day:
+            self._day_counters.clear()
+            self._current_day = current_day
+
+        key = (actor_id, tool_name)
 
         if limit_per_step is not None:
-            step_key = (actor_id, tool_name, int(sim_time_ns))
-            count = self._counters.get(step_key, 0)
+            count = self._step_counters.get(key, 0)
             if count >= limit_per_step:
                 return f"Rate limit exceeded: {limit_per_step} per step"
-            self._counters[step_key] = count + 1
+            self._step_counters[key] = count + 1
 
         if limit_per_day is not None:
-            day_key = (actor_id, tool_name, int(sim_time_ns // NANOS_PER_DAY))
-            count = self._counters.get(day_key, 0)
+            count = self._day_counters.get(key, 0)
             if count >= limit_per_day:
                 return f"Rate limit exceeded: {limit_per_day} per day"
-            self._counters[day_key] = count + 1
+            self._day_counters[key] = count + 1
 
         return None
 

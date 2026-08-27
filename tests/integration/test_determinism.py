@@ -55,11 +55,19 @@ def run_sim_for_hash(seed: int, monkeypatch) -> str:
     return engine.get_state_hash()
 
 
-def test_determinism_multi_run(monkeypatch) -> None:
-    """Verify that multiple runs with the same seed produce the identical state hash."""
-    hash1 = run_sim_for_hash(123, monkeypatch)
-    hash2 = run_sim_for_hash(123, monkeypatch)
-    hash3 = run_sim_for_hash(999, monkeypatch)
+from hypothesis import given, settings, HealthCheck, strategies as st
 
-    assert hash1 == hash2, "Hashes for the same seed should be identical"
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(
+    seed=st.integers(min_value=0, max_value=2**32 - 1),
+    num_users=st.integers(min_value=10, max_value=50),
+    num_merchants=st.integers(min_value=2, max_value=10),
+)
+def test_determinism_multi_run(monkeypatch, seed: int, num_users: int, num_merchants: int) -> None:
+    """Verify that multiple runs with the same seed produce the identical state hash."""
+    hash1 = run_sim_for_hash(seed, monkeypatch)
+    hash2 = run_sim_for_hash(seed, monkeypatch)
+    hash3 = run_sim_for_hash(seed + 1, monkeypatch)
+
+    assert hash1 == hash2, f"Hashes for the same seed ({seed}) should be identical"
     assert hash1 != hash3, "Hashes for different seeds should be different"

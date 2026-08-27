@@ -69,12 +69,13 @@ class WorldEngineImpl:
         branch_id: str = "main",
         global_params: GlobalParams | None = None,
         chrono: ChronoDAG | None = None,
+        seq_num: int = 0,
     ) -> None:
         self._env = env
         self._rng = rng
         self._branch_id = branch_id
         self._chrono = chrono
-        self._seq_num: int = 0
+        self._seq_num: int = seq_num
 
         self._accounts: dict[str, Account] = {}
         self._payments: dict[str, Payment] = {}
@@ -87,7 +88,7 @@ class WorldEngineImpl:
             fee_schedules=(), rail_limits=(), settlement_cut_off_ns=0.0
         )
 
-        self._processed_idempotency_keys: set[str] = set()
+        self._processed_idempotency_keys: dict[str, None] = {}
         self._tx_counter: int = 0
 
     @property
@@ -162,13 +163,15 @@ class WorldEngineImpl:
 
         self._persist_events(events)
         self._apply_events(events)
-        self._processed_idempotency_keys.add(command.idempotency_key)
+        self._processed_idempotency_keys[command.idempotency_key] = None
+        if len(self._processed_idempotency_keys) > 10000:
+            self._processed_idempotency_keys.pop(next(iter(self._processed_idempotency_keys)))
 
         rejection_types = {
             "PaymentDeclined", "TransferRejected", "RefundRejected",
             "AccountFreezeFailed", "PaymentTimeout",
         }
-        success = any(type(e).__name__ not in rejection_types for e in events)
+        success = len(events) > 0 and all(type(e).__name__ not in rejection_types for e in events)
 
         return CommandResult(events=tuple(events), success=success)
 
@@ -194,13 +197,9 @@ class WorldEngineImpl:
     def get_state_hash(self) -> str:
         canonical = {
             "accounts": {k: v.to_canonical_dict() for k, v in sorted(self._accounts.items())},
-            "payments": {k: v.to_canonical_dict() for k, v in sorted(self._payments.items())},
             "devices": {k: v.to_canonical_dict() for k, v in sorted(self._devices.items())},
             "merchants": {k: v.to_canonical_dict() for k, v in sorted(self._merchants.items())},
             "gateways": {k: v.to_canonical_dict() for k, v in sorted(self._gateways.items())},
-            "settlement_batches": {
-                k: v.to_canonical_dict() for k, v in sorted(self._settlement_batches.items())
-            },
             "scheduler_queue_size": self._env.queue_size,
             "scheduler_step_count": self._env.step_count,
             "sim_time_ns": self._env.now,
@@ -379,7 +378,12 @@ class WorldEngineImpl:
 
         # In a real system, we would wait for auth. For this basic handler, we simulate auth failure if balance low
         src = self._accounts.get(command.source_account_id or "")
-        if src and src.can_debit(command.amount_paise):
+        if not src:
+            events.append(self._create_event(
+                PaymentDeclined, actor_id=command.actor_id, tx_id=tx_id,
+                reason="Invalid source account", decline_code="INVALID_ACCOUNT"
+            ))
+        elif src.can_debit(command.amount_paise):
             events.append(self._create_event(
                 PaymentDeclined, actor_id=command.actor_id, tx_id=tx_id,
                 reason="Insufficient funds", decline_code="INSUFFICIENT_FUNDS"

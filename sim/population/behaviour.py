@@ -314,10 +314,10 @@ class PopulationBehaviourModel:
         ]
 
     def get_next_interarrival(
-        self, entity_id: str, action_type: TransactionType, current_time_ns: float
+        self, entity_id: str, action_type: TransactionType, current_time_ns: float, population_size: int = 1
     ) -> float:
         """Sample the next inter-arrival delay in nanoseconds."""
         rng = self.get_entity_rng(entity_id)
         return self._temporal_model.sample_next_interarrival(
-            action_type, current_time_ns, rng
+            action_type, current_time_ns, rng, population_size
         )

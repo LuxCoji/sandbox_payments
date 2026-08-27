@@ -47,17 +47,17 @@ def _session() -> SimSession:
 
 
 @app.get("/api/health")
-def health():
+async def health():
     return {"ok": True}
 
 
 @app.get("/api/branches")
-def list_branches():
+async def list_branches():
     return _session().list_branch_graph()
 
 
 @app.get("/api/branches/{branch_id}/state")
-def branch_state(branch_id: str):
+async def branch_state(branch_id: str):
     try:
         return _session().branch_summary(branch_id)
     except KeyError:
@@ -65,7 +65,7 @@ def branch_state(branch_id: str):
 
 
 @app.get("/api/branches/{branch_id}/accounts")
-def branch_accounts(branch_id: str):
+async def branch_accounts(branch_id: str):
     try:
         return _session().accounts(branch_id)
     except KeyError:
@@ -73,7 +73,7 @@ def branch_accounts(branch_id: str):
 
 
 @app.get("/api/branches/{branch_id}/accounts/{account_id}/events")
-def account_events(branch_id: str, account_id: str):
+async def account_events(branch_id: str, account_id: str):
     try:
         return _session().account_events(branch_id, account_id)
     except KeyError:
@@ -81,7 +81,7 @@ def account_events(branch_id: str, account_id: str):
 
 
 @app.get("/api/branches/{branch_id}/events")
-def branch_events(branch_id: str, since_seq: int = 0, limit: int = 200):
+async def branch_events(branch_id: str, since_seq: int = 0, limit: int = 200):
     try:
         return _session().recent_events(branch_id, since_seq, limit)
     except KeyError:
@@ -89,7 +89,7 @@ def branch_events(branch_id: str, since_seq: int = 0, limit: int = 200):
 
 
 @app.get("/api/branches/{branch_id}/breakdown")
-def branch_breakdown(branch_id: str):
+async def branch_breakdown(branch_id: str):
     try:
         return _session().event_breakdown(branch_id)
     except KeyError:
@@ -97,7 +97,7 @@ def branch_breakdown(branch_id: str):
 
 
 @app.get("/api/branches/{branch_id}/checkpoints")
-def branch_checkpoints(branch_id: str):
+async def branch_checkpoints(branch_id: str):
     try:
         return _session().checkpoints(branch_id)
     except KeyError:
@@ -105,7 +105,7 @@ def branch_checkpoints(branch_id: str):
 
 
 @app.post("/api/branches/{branch_id}/checkpoint")
-def make_checkpoint(branch_id: str):
+async def make_checkpoint(branch_id: str):
     try:
         return _session().create_checkpoint(branch_id)
     except KeyError:
@@ -119,7 +119,7 @@ class ForkRequest(BaseModel):
 
 
 @app.post("/api/branches/fork")
-def fork_branch(req: ForkRequest):
+async def fork_branch(req: ForkRequest):
     try:
         return _session().fork(req.parent_branch_id, req.name, req.checkpoint_id)
     except KeyError:
@@ -132,7 +132,7 @@ class ChaosRequest(BaseModel):
 
 
 @app.post("/api/branches/{branch_id}/chaos")
-def chaos(branch_id: str, req: ChaosRequest):
+async def chaos(branch_id: str, req: ChaosRequest):
     try:
         return _session().apply_chaos(branch_id, req.action, req.params)
     except KeyError as e:
@@ -142,7 +142,7 @@ def chaos(branch_id: str, req: ChaosRequest):
 
 
 @app.get("/api/diff")
-def diff(branch_a: str, branch_b: str):
+async def diff(branch_a: str, branch_b: str):
     try:
         return _session().diff(branch_a, branch_b)
     except KeyError:
@@ -154,7 +154,7 @@ class PauseRequest(BaseModel):
 
 
 @app.post("/api/pause")
-def pause(req: PauseRequest):
+async def pause(req: PauseRequest):
     _session().set_paused(req.paused)
     return {"paused": req.paused}
 

@@ -32,12 +32,17 @@ export default function App() {
   useEffect(() => {
     let ws: WebSocket;
     let retry: number;
+    let delay = 1500;
     function connect() {
       ws = new WebSocket(wsUrl());
-      ws.onopen = () => setConnected(true);
+      ws.onopen = () => {
+        setConnected(true);
+        delay = 1500;
+      };
       ws.onclose = () => {
         setConnected(false);
-        retry = window.setTimeout(connect, 1500);
+        delay = Math.min(delay * 1.5, 30000);
+        retry = window.setTimeout(connect, delay + Math.random() * 500);
       };
       ws.onmessage = (msg) => {
         const data = JSON.parse(msg.data);
@@ -68,24 +73,39 @@ export default function App() {
 
   // Poll branch list (fork topology changes infrequently)
   useEffect(() => {
-    const load = () => api.branches().then(setBranches).catch(() => {});
+    let timerId: number;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const b = await api.branches();
+        if (!cancelled) setBranches(b);
+      } catch (e) {}
+      if (!cancelled) timerId = window.setTimeout(load, 3000);
+    };
     load();
-    const id = setInterval(load, 3000);
-    return () => clearInterval(id);
+    return () => {
+      cancelled = true;
+      clearTimeout(timerId);
+    };
   }, []);
 
   // Load state + accounts whenever the selected branch changes (and refresh a paused branch's state)
   useEffect(() => {
+    let timerId: number;
     let cancelled = false;
-    function refresh() {
-      api.branchState(selectedBranch).then((s) => !cancelled && setBranchState(s)).catch(() => {});
-      api.accounts(selectedBranch).then((a) => !cancelled && setAccounts(a)).catch(() => {});
-    }
+    const refresh = async () => {
+      try {
+        const s = await api.branchState(selectedBranch);
+        if (!cancelled) setBranchState(s);
+        const a = await api.accounts(selectedBranch);
+        if (!cancelled) setAccounts(a);
+      } catch (e) {}
+      if (!cancelled) timerId = window.setTimeout(refresh, selectedBranch === "main" ? 5000 : 1500);
+    };
     refresh();
-    const id = setInterval(refresh, selectedBranch === "main" ? 5000 : 1500);
     return () => {
       cancelled = true;
-      clearInterval(id);
+      clearTimeout(timerId);
     };
   }, [selectedBranch]);
 

@@ -13,21 +13,22 @@ def get_logger(name: str) -> structlog.BoundLogger:
             event_dict["span_id"] = format(ctx.span_id, "016x")
         return event_dict
 
-    import logging
-    import sys
-    logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(message)s")
-    
-    structlog.configure(
-        processors=[
-            structlog.stdlib.add_log_level,
-            structlog.stdlib.add_logger_name,
-            add_trace_id,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.JSONRenderer()
-        ],
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.stdlib.BoundLogger,
-        cache_logger_on_first_use=True,
-    )
+    if not structlog.is_configured():
+        import logging
+        import sys
+        logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(message)s")
+        
+        structlog.configure(
+            processors=[
+                structlog.stdlib.add_log_level,
+                structlog.stdlib.add_logger_name,
+                add_trace_id,
+                structlog.processors.TimeStamper(fmt="iso"),
+                structlog.processors.JSONRenderer()
+            ],
+            logger_factory=structlog.stdlib.LoggerFactory(),
+            wrapper_class=structlog.stdlib.BoundLogger,
+            cache_logger_on_first_use=True,
+        )
     
     return structlog.get_logger(name)

@@ -72,25 +72,43 @@ class TemporalModel:
         action_type: TransactionType,
         current_time_ns: float,
         rng: DeterministicRNG,
+        population_size: int = 1,
     ) -> float:
         """Sample the delta time (in nanoseconds) until the next action occurs.
 
-        Uses the exponential distribution with mean scale = 1 / lambda,
-        where lambda is scaled from hourly rate to nanoseconds.
+        Uses the Lewis-Shedler thinning algorithm for non-homogeneous Poisson processes.
 
         Args:
             action_type: Type of action scheduled.
             current_time_ns: Current simulation timestamp.
             rng: DeterministicRNG instance.
+            population_size: Number of active agents to distribute the global rate across.
 
         Returns:
             Delta time in nanoseconds until next event (float).
         """
-        rate_per_hour = self.get_rate(action_type, current_time_ns)
-        # Convert rate per hour to average nanoseconds between arrivals
-        # mean_delta_ns = NS_PER_HOUR / rate_per_hour
-        mean_delta_ns = NS_PER_HOUR / rate_per_hour
+        # Find the maximum rate for thinning (upper bound lambda)
+        matrix = self._params.temporal_rate_matrix.get(action_type)
+        if not matrix:
+            max_rate = 1.0
+        else:
+            max_rate = max(max(day) for day in matrix)
 
-        # Sample from exponential distribution
-        delta_t_ns = rng.exponential(scale=mean_delta_ns)
-        return max(MIN_INTERARRIVAL_NS, float(delta_t_ns))
+        max_rate_per_agent = max(0.01, max_rate) / max(1, population_size)
+        lambda_star = max_rate_per_agent
+        mean_delta_star_ns = NS_PER_HOUR / lambda_star
+
+        t_ns = current_time_ns
+        while True:
+            # Sample exponential step based on lambda_star
+            step_ns = rng.exponential(scale=mean_delta_star_ns)
+            t_ns += step_ns
+
+            # Compute actual rate at time t_ns
+            current_rate = self.get_rate(action_type, t_ns)
+            actual_rate_per_agent = current_rate / max(1, population_size)
+
+            # Accept with probability lambda(t) / lambda_star
+            if rng.random() < (actual_rate_per_agent / lambda_star):
+                delta_t_ns = t_ns - current_time_ns
+                return max(MIN_INTERARRIVAL_NS, float(delta_t_ns))
