@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from sim.gateway.interfaces import ActorContext, ToolResult, ToolSpec
 from sim.gateway.policy import RateLimiter, check_capabilities
+from sim.observability import TOOL_CALLS, traced
 
 if TYPE_CHECKING:
     from sim.core.interfaces import ActorRole, WorldEngine
@@ -25,12 +26,14 @@ class ToolGatewayImpl:
     def list_tools(self, context: ActorContext) -> list[ToolSpec]:
         return self._registry.list_tools(context)
 
+    @traced("ToolGateway.call_tool")
     def call_tool(
         self,
         tool_name: str,
         parameters: dict[str, object],
         context: ActorContext,
     ) -> ToolResult:
+        TOOL_CALLS.labels(tool_name=tool_name, actor_role=context.actor_role.value).inc()
 
         tool_data = self._registry.get_tool(tool_name)
         if not tool_data:

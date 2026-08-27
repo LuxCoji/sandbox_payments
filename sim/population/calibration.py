@@ -35,6 +35,29 @@ def calibrate_from_csv(data_dir: str | Path) -> CalibratedParams:
     """
     data_path = Path(data_dir)
 
+    # 0. Parse transactionsTypes.csv -> canonical set of valid transaction
+    # type codes, used below to validate the other CSVs reference only
+    # recognized types instead of silently accepting typos/stale codes.
+    valid_tx_types: set[TransactionType] = set()
+    types_csv = data_path / "transactionsTypes.csv"
+    if types_csv.exists():
+        with open(types_csv, encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                code = row["code"].strip()
+                try:
+                    valid_tx_types.add(TransactionType(code))
+                except ValueError:
+                    raise ValueError(
+                        f"transactionsTypes.csv declares unknown TransactionType code: {code!r}"
+                    ) from None
+
+    def _validate_type(tx_type: TransactionType, source_csv: str) -> None:
+        if valid_tx_types and tx_type not in valid_tx_types:
+            raise ValueError(
+                f"{source_csv} references TransactionType {tx_type.value!r} "
+                f"not declared in transactionsTypes.csv"
+            )
+
     # 1. Parse clientsProfiles.csv
     profiles_by_type: dict[TransactionType, list[ActionProfile]] = {}
     profiles_csv = data_path / "clientsProfiles.csv"
@@ -45,6 +68,7 @@ def calibrate_from_csv(data_dir: str | Path) -> CalibratedParams:
         reader = csv.DictReader(f)
         for row in reader:
             tx_type = TransactionType(row["stepType"].strip())
+            _validate_type(tx_type, "clientsProfiles.csv")
             min_count = int(row["minCount"])
             max_count = int(row["maxCount"])
             # Convert currency float to integer paise (₹1.00 = 100 paise)
@@ -90,6 +114,7 @@ def calibrate_from_csv(data_dir: str | Path) -> CalibratedParams:
         reader = csv.DictReader(f)
         for row in reader:
             tx_type = TransactionType(row["stepType"].strip())
+            _validate_type(tx_type, "maxOccurrencesPerClient.csv")
             max_occurrences[tx_type] = int(row["maxOccurrences"])
 
     # 4. Parse aggregatedTransactions.csv -> 24x7 matrix per TransactionType
@@ -105,6 +130,7 @@ def calibrate_from_csv(data_dir: str | Path) -> CalibratedParams:
             day_idx = int(row["day"]) - 1  # 1-7 -> 0-6
             hour_idx = int(row["hour"])    # 0-23
             tx_type = TransactionType(row["stepType"].strip())
+            _validate_type(tx_type, "aggregatedTransactions.csv")
             rate = float(row["normalizedRate"])
 
             if tx_type not in temp_matrices:

@@ -75,7 +75,7 @@ class BehaviourModel(Protocol):
             - Select targets (merchant affinity for PAYMENT, peers for TRANSFER)
 
         MERCHANT entities:
-            - Low-probability passive actions (REFUND, PAYOUT)
+            - Low-probability passive actions (REFUND, SETTLEMENT)
             - Based on balance and temporal rates
 
         Returns:

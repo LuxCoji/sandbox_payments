@@ -11,7 +11,6 @@ version = "0.1.0"
 description = "Financial Digital Twin + Adversarial Testing Environment"
 requires-python = ">= 3.11"
 dependencies = [
-    "simpy",
     "eventsourcing",
     "numpy",
     "pydantic",
@@ -27,6 +26,9 @@ dependencies = [
     "pymacaroons",
     "pyyaml",
     "python-dotenv>=1.2.3",
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.4",
+    "websockets>=17.1",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +45,11 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["sim", "tests"]
 asyncio_mode = "auto"
+# Default is ["test_*.py", "*_test.py"] which silently never collects the
+# contract_test_*.py files under sim/*/tests/ (make test-contract's `-k
+# contract_test` filter runs AFTER collection, so it was filtering an empty
+# set). Add the contract-test naming pattern explicitly.
+python_files = ["test_*.py", "*_test.py", "contract_test_*.py"]
 
 [tool.ruff]
 line-length = 120
@@ -133,6 +140,35 @@ forbidden_modules = [
     "sim.population.calibration",
     "sim.population.profiles",
     "sim.population.temporal",
+]
+
+[[tool.importlinter.contracts]]
+name = "Gateway does not import Core, Population, or Chrono implementations"
+type = "forbidden"
+source_modules = ["sim.gateway"]
+ignore_imports = [
+    "sim.core.interfaces -> sim.core.events",
+    "sim.core.interfaces -> sim.scheduler.env"
+]
+forbidden_modules = [
+    "sim.core.engine",
+    "sim.core.payment",
+    "sim.core.account",
+    "sim.core.device",
+    "sim.core.gateway",
+    "sim.core.merchant",
+    "sim.core.settlement",
+    "sim.core.events",
+    "sim.population.agents",
+    "sim.population.behaviour",
+    "sim.population.calibration",
+    "sim.population.profiles",
+    "sim.population.temporal",
+    "sim.chrono.store",
+    "sim.chrono.branch",
+    "sim.chrono.checkpoint",
+    "sim.chrono.replay",
+    "sim.chrono.hashing",
 ]
 
 [[tool.importlinter.contracts]]

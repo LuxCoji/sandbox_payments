@@ -46,18 +46,18 @@ def run_regression() -> None:
     except FileNotFoundError:
         # Fallback if csvs not generated
         from sim.population.interfaces import CalibratedParams
-        params = CalibratedParams({}, [], {}, {}, {})
+        params = CalibratedParams({}, (), {}, {}, {})
         
     for seed in seeds_to_test:
         logger.info("Testing seed", seed=seed)
         
         # 1. Boot simulation
-        config = SimConfig(seed=seed, num_users=100, sim_duration_days=1.0, db_url=db_url)
+        config = SimConfig(seed=seed, num_users=100, sim_duration_days=1, db_url=db_url)
         engine, gateway, dag = build_simulation(config)
         
         behaviour_model = PopulationBehaviourModel(params, engine._rng)
         population = PopulationManager(behaviour_model, engine._rng)
-        population.create_population(num_users=100, num_merchants=10)
+        population.create_population(num_users=100, num_merchants=10, engine=engine)
         population.start_agent_loops(engine)
         
         # Run simulation for a fixed number of events or fixed time (e.g., 24 hours)

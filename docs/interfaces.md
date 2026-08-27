@@ -12,7 +12,7 @@ This document is the **single source of truth** for all contracts, data shapes, 
 4. **State & Event Causality (CQRS)**: In-memory aggregate projections are read-only to external callers and are mutated strictly by applying emitted `DomainEvent` instances via event handlers (`apply_event`).
 5. **Types & Units**:
    - Currency: **INR only**, with all amounts represented as integer **paise** (`₹1.00 = 100 paise`).
-   - Identifiers: **UUIDv4 strings** (36-character format).
+   - Identifiers: **UUIDv7 strings** (36-character format) for entity IDs (accounts, merchants, devices — generated deterministically from `DeterministicRNG`, see `sim/population/behaviour.py:_generate_deterministic_uuid`). Engine-internal IDs (`event_id`, `tx_id`, etc.) are deterministic **UUIDv5** (name-based, derived from `branch_id` + a monotonic counter) rather than v7, since v7 requires either wall-clock time or RNG bytes the engine doesn't consume for this purpose — both schemes are equally deterministic/replay-safe, they just differ in whether the ID is time-ordered.
    - Simulation Time: Represented as nanoseconds (`sim_time_ns: float`).
 
 ---
@@ -262,7 +262,7 @@ class CalibratedParams:
 
 ### Protocol: `ChronoDAG`
 - `save_event(event: StoredEvent) -> None`
-- `create_checkpoint(branch_id: str, event_number: int) -> Checkpoint`
+- `create_checkpoint(branch_id: str, event_number: int, sim_time_ns: float, state_hash: str, aggregate_snapshot: bytes, rng_state: bytes, metadata: dict[str, object] | None = None) -> Checkpoint`
 - `fork(checkpoint_id: str, branch_id: str, metadata: dict[str, object] | None = None) -> Branch`
 - `checkout(branch_id: str) -> ReplayContext`
 - `diff(branch_a: str, branch_b: str, at_event: int) -> StateDiff`

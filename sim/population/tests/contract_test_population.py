@@ -228,22 +228,45 @@ def test_calibrated_params_serialization(tmp_path: Path) -> None:
 
 
 def test_import_isolation() -> None:
-    """Verify sim.population does not import concrete engine or chrono implementations."""
-    import sim.population.agents
-    import sim.population.behaviour
-    import sim.population.calibration
-    import sim.population.profiles
-    import sim.population.temporal
+    """Verify sim.population's own source doesn't statically import concrete
+    engine/chrono implementations.
 
-    forbidden_modules = [
-        "sim.core.engine",
-        "sim.core.payment",
-        "sim.core.account",
-        "sim.chrono.store",
-        "sim.chrono.branch",
-        "simpy",
+    This is a static per-file check (not a sys.modules check) deliberately:
+    sys.modules is process-global, so checking it after other test modules
+    have already imported sim.core.engine for unrelated reasons produces
+    false positives regardless of what sim.population itself imports. The
+    authoritative, order-independent version of this contract is enforced
+    by import-linter (see `make lint` / `lint-imports`); this test is a
+    lightweight sanity check on top of that.
+    """
+    import ast
+    import importlib.util
+
+    forbidden_prefixes = (
+        "sim.core.engine", "sim.core.payment", "sim.core.account",
+        "sim.chrono.store", "sim.chrono.branch", "simpy",
+    )
+    population_modules = [
+        "sim.population.agents",
+        "sim.population.behaviour",
+        "sim.population.calibration",
+        "sim.population.profiles",
+        "sim.population.temporal",
     ]
 
-    import sys
-    for mod_name in forbidden_modules:
-        assert mod_name not in sys.modules, f"Forbidden module {mod_name} was imported!"
+    for mod_name in population_modules:
+        spec = importlib.util.find_spec(mod_name)
+        assert spec and spec.origin, f"Could not locate source for {mod_name}"
+        with open(spec.origin) as f:
+            tree = ast.parse(f.read(), filename=spec.origin)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            else:
+                continue
+            for name in names:
+                assert not name.startswith(forbidden_prefixes), (
+                    f"{mod_name} statically imports forbidden module: {name}"
+                )

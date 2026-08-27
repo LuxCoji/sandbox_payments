@@ -18,6 +18,7 @@ from sim.core.interfaces import (
     TransactionType,
     WorldView,
 )
+from sim.observability import traced
 from sim.population.interfaces import (
     BehaviourModel,
     CalibratedParams,
@@ -26,6 +27,17 @@ from sim.population.interfaces import (
 from sim.population.profiles import ProfileSampler
 from sim.population.temporal import TemporalModel
 from sim.scheduler.rng import DeterministicRNG
+
+
+# Canonical entity-RNG keying scheme: "user"/"merchant" (lowercase), matching
+# PopulationManager.create_population's spawn_for_entity() calls. Every RNG
+# consumer for a given entity MUST route through get_entity_rng() with these
+# same keys so the entity gets one continuous, cached stream instead of a
+# fresh (and previously inconsistently-keyed) spawn per call site.
+_ROLE_ENTITY_TYPE: dict[ActorRole, str] = {
+    ActorRole.USER: "user",
+    ActorRole.MERCHANT: "merchant",
+}
 
 
 def _generate_deterministic_uuid(rng: DeterministicRNG) -> str:
@@ -125,6 +137,7 @@ class PopulationBehaviourModel:
             "device_type": device_type,
         }
 
+    @traced("BehaviourModel.propose_actions")
     def propose_actions(
         self, entity_id: str, world_view: WorldView
     ) -> list[Intent]:
@@ -134,7 +147,9 @@ class PopulationBehaviourModel:
           - High balance -> higher outflow probabilities (PAYMENT, TRANSFER, CASH_OUT)
           - Low balance -> suppressed outflows, higher inflow probabilities (CASH_IN, DEBIT)
         """
-        rng = self.get_entity_rng(entity_id, world_view.actor_role.value)
+        rng = self.get_entity_rng(
+            entity_id, _ROLE_ENTITY_TYPE.get(world_view.actor_role, "actor")
+        )
 
         # Check if actor has active accounts
         active_accounts = [
@@ -264,16 +279,25 @@ class PopulationBehaviourModel:
         total_balance_paise: int,
         rng: DeterministicRNG,
     ) -> list[Intent]:
-        """Propose passive merchant actions (low-probability refund or settlement payout)."""
+        """Propose passive merchant actions (low-probability refund or settlement sweep),
+        gated and weighted by the calibrated 24x7 temporal rates rather than a fixed split."""
         # Merchants have low probability of initiating unprompted actions
         if total_balance_paise < 10_000:
             return []
 
-        # 5% probability of initiating a refund or settlement sweep
-        if rng.random() > 0.05:
+        refund_rate = self._temporal_model.get_rate(TransactionType.REFUND, world_view.sim_time_ns)
+        settlement_rate = self._temporal_model.get_rate(TransactionType.SETTLEMENT, world_view.sim_time_ns)
+        combined_rate = refund_rate + settlement_rate  # actions/hour, per calibrated PaySim data
+
+        # Convert the combined hourly rate into a per-call action probability.
+        # Calibrated PaySim rates are typically well under 100/hr; cap at 0.5
+        # so merchants stay passive/low-probability per the plan's intent.
+        action_probability = min(0.5, combined_rate / 100.0)
+        if rng.random() > action_probability:
             return []
 
-        action_type = TransactionType.REFUND if rng.random() < 0.70 else TransactionType.SETTLEMENT
+        p_refund = refund_rate / combined_rate if combined_rate > 0 else 0.5
+        action_type = TransactionType.REFUND if rng.random() < p_refund else TransactionType.SETTLEMENT
         amount_paise = int(round(rng.uniform(500, min(50_000, total_balance_paise))))
         idempotency_key = _generate_deterministic_uuid(rng)
         device_id = world_view.devices[0].device_id if world_view.devices else None

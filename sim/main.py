@@ -1,46 +1,39 @@
-"""Composition root — wires all subsystems."""
+"""Composition root — wires all subsystems and exposes the FinSim CLI.
+
+CLI entrypoint (per the original plan): ``python -m sim.main <command>`` with
+subcommands ``run-seed``, ``fork-branch``, ``replay-branch``, ``diff-branches``.
+"""
 from __future__ import annotations
 
 import argparse
+import sys
 
+from sim.chrono.store import PostgresChronoDAG
 from sim.config import SimConfig
 from sim.core.engine import WorldEngineImpl
 from sim.gateway.gateway import ToolGatewayImpl
 from sim.gateway.policy import RateLimiter
 from sim.gateway.registry import ToolRegistry
+from sim.observability import get_logger, setup_tracing, start_metrics_server
 from sim.scheduler.env import SimulationEnv
 from sim.scheduler.rng import DeterministicRNG
 
+logger = get_logger("finsim.cli")
 
-class NullChronoDAG:
-    """In-memory ChronoDAG stub for MVP."""
-    def __init__(self) -> None:
-        self.events: list = []
-
-    def save_event(self, event: object) -> None:
-        self.events.append(event)
-
-    def fork(self, *a: object, **kw: object) -> None: raise NotImplementedError
-    def checkout(self, *a: object, **kw: object) -> None: raise NotImplementedError
-    def replay(self, *a: object, **kw: object) -> None: raise NotImplementedError
-    def diff(self, *a: object, **kw: object) -> None: raise NotImplementedError
-    def create_checkpoint(self, *a: object, **kw: object) -> None: raise NotImplementedError
-    def get_state_hash(self, *a: object, **kw: object) -> None: raise NotImplementedError
-
-
-from sim.chrono.store import PostgresChronoDAG
 
 def build_simulation(config: SimConfig) -> tuple[WorldEngineImpl, ToolGatewayImpl, PostgresChronoDAG]:
     rng = DeterministicRNG.from_seed(config.seed)
     env = SimulationEnv()
-    engine = WorldEngineImpl(env=env, rng=rng)
+
+    # Chrono is wired into the engine so execute_command() persists every
+    # emitted event via the Emit -> Append -> Apply pipeline (see engine.py).
+    chrono = PostgresChronoDAG(config.db_url)
+    engine = WorldEngineImpl(env=env, rng=rng, chrono=chrono)
+
     registry = ToolRegistry()
     rate_limiter = RateLimiter()
     gateway = ToolGatewayImpl(registry=registry, rate_limiter=rate_limiter, engine=engine)
-    
-    # Initialize the real DAG
-    chrono = PostgresChronoDAG(config.db_url)
-    
+
     _register_core_tools(registry, engine)
 
     return engine, gateway, chrono
@@ -110,8 +103,145 @@ def _register_core_tools(registry: ToolRegistry, engine: WorldEngineImpl) -> Non
         inspect_account_handler
     )
 
+def _resolve_db_url(args: argparse.Namespace) -> str:
+    """CLI --db-url flag takes precedence; otherwise fall back to
+    FINSIM_DB_URL from the environment/.env via SimConfig."""
+    db_url = args.db_url or SimConfig().db_url
+    if not db_url:
+        raise SystemExit(
+            "No database URL: pass --db-url or set FINSIM_DB_URL in the environment/.env"
+        )
+    return db_url
+
+
+def run_seed(args: argparse.Namespace) -> None:
+    """Run a new simulation from a deterministic seed."""
+    import os
+
+    from sim.population.agents import PopulationManager
+    from sim.population.behaviour import PopulationBehaviourModel
+    from sim.population.calibration import calibrate_from_csv
+
+    logger.info("Initializing simulation...", seed=args.seed, users=args.users)
+
+    config = SimConfig(
+        seed=args.seed,
+        num_users=args.users,
+        sim_duration_days=max(1, int(args.duration_hours / 24)),
+        db_url=args.db_url or SimConfig().db_url,
+    )
+    engine, _gateway, _dag = build_simulation(config)
+
+    data_dir = os.path.join(os.path.dirname(__file__), "..", "data", "paysim")
+    try:
+        params = calibrate_from_csv(data_dir)
+    except FileNotFoundError:
+        from sim.population.interfaces import CalibratedParams
+        params = CalibratedParams({}, (), {}, {}, {})
+
+    behaviour_model = PopulationBehaviourModel(params, engine._rng)
+    population = PopulationManager(behaviour_model, engine._rng)
+
+    population.create_population(
+        num_users=args.users, num_merchants=max(1, args.users // 10), engine=engine
+    )
+    population.start_agent_loops(engine)
+
+    engine._env.run(until=args.duration_hours * 3600 * 1e9)
+
+    logger.info(
+        "Simulation finished",
+        final_hash=engine.get_state_hash(),
+        step_count=engine._env.step_count,
+    )
+
+
+def fork_branch(args: argparse.Namespace) -> None:
+    """Create a new alternate-timeline branch from a checkpoint."""
+    dag = PostgresChronoDAG(_resolve_db_url(args))
+    branch = dag.fork(checkpoint_id=args.checkpoint, branch_id=args.branch)
+    logger.info("Branch forked successfully", branch=args.branch, seed_offset=branch.seed_offset)
+
+
+def replay_branch(args: argparse.Namespace) -> None:
+    """Replay a branch's event log over a given event-number range."""
+    dag = PostgresChronoDAG(_resolve_db_url(args))
+    events = dag.replay(args.branch, args.from_event, args.to_event)
+    logger.info("Replay complete", branch=args.branch, event_count=len(events))
+    for event in events:
+        logger.info(
+            "event",
+            event_id=event.event_id,
+            event_type=event.event_type,
+            seq_num=event.seq_num,
+        )
+
+
+def diff_branches(args: argparse.Namespace) -> None:
+    """Compute the state diff between two branches at a specific event."""
+    dag = PostgresChronoDAG(_resolve_db_url(args))
+    try:
+        diff = dag.diff(args.branch_a, args.branch_b, args.event)
+        logger.info(
+            "Diff computed",
+            added=len(diff.entities_added),
+            removed=len(diff.entities_removed),
+            modified=len(diff.entities_modified),
+            unique_events_a=diff.events_only_in_a,
+            unique_events_b=diff.events_only_in_b,
+        )
+    except Exception as e:
+        logger.error("Failed to compute diff", error=str(e))
+        sys.exit(1)
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="FinSim CLI (Adversarial Sandbox)")
+    parser.add_argument("--db-url", type=str, default=None, help="PostgreSQL URL (overrides FINSIM_DB_URL)")
+    parser.add_argument("--metrics-port", type=int, default=8000, help="Port for Prometheus metrics")
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    p_run = subparsers.add_parser("run-seed", help="Run a new simulation from a deterministic seed")
+    p_run.add_argument("--seed", type=int, required=True, help="Deterministic RNG seed")
+    p_run.add_argument("--users", type=int, default=1000, help="Number of users to generate")
+    p_run.add_argument("--duration-hours", type=int, default=24, help="Simulation duration in hours")
+
+    p_fork = subparsers.add_parser("fork-branch", help="Fork a new alternate timeline branch from a checkpoint")
+    p_fork.add_argument("--checkpoint", type=str, required=True, help="Checkpoint ID to fork from")
+    p_fork.add_argument("--branch", type=str, required=True, help="Name of the new branch")
+
+    p_replay = subparsers.add_parser("replay-branch", help="Replay a branch's event log over an event range")
+    p_replay.add_argument("--branch", type=str, required=True)
+    p_replay.add_argument("--from-event", type=int, default=0, dest="from_event")
+    p_replay.add_argument("--to-event", type=int, required=True, dest="to_event")
+
+    p_diff = subparsers.add_parser("diff-branches", help="Compare states between two branches at a specific event")
+    p_diff.add_argument("--branch-a", type=str, required=True, dest="branch_a")
+    p_diff.add_argument("--branch-b", type=str, required=True, dest="branch_b")
+    p_diff.add_argument("--event", type=int, required=True, help="Event sequence number to diff at")
+
+    return parser
+
+
 def main() -> None:
-    pass
+    args = _build_arg_parser().parse_args()
+
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    setup_tracing("finsim.runner")
+    start_metrics_server(args.metrics_port)
+    logger.info("Observability started", metrics_port=args.metrics_port)
+
+    commands = {
+        "run-seed": run_seed,
+        "fork-branch": fork_branch,
+        "replay-branch": replay_branch,
+        "diff-branches": diff_branches,
+    }
+    commands[args.command](args)
+
 
 if __name__ == "__main__":
     main()

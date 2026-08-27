@@ -36,3 +36,24 @@ def test_population_manager_creation() -> None:
 
     directory = manager.get_public_merchant_directory()
     assert len(directory) == 5
+
+
+def test_entity_rng_is_one_continuous_stream() -> None:
+    """Phase 1 fix: entity creation must route through the model's cached
+    get_entity_rng() (canonical "user"/"merchant" keying) instead of spawning
+    a throwaway stream directly off root_rng, so the entity's post-init
+    behaviour (propose_actions) continues the same stream rather than
+    restarting it from scratch."""
+    params = calibrate_from_csv(DATA_DIR)
+    root_rng = DeterministicRNG.from_seed(7)
+    behaviour_model = PopulationBehaviourModel(params, root_rng=root_rng)
+    manager = PopulationManager(behaviour_model, root_rng)
+    manager.create_population(num_users=1, num_merchants=0)
+    user = manager.users[0]
+
+    cached_rng = behaviour_model.get_entity_rng(user.entity_id, "user")
+    fresh_rng = root_rng.spawn_for_entity("user", user.entity_id)
+
+    # initialize_entity() already drew from the cached stream, so it must not
+    # be sitting at the same starting position as a brand-new spawn.
+    assert cached_rng.random() != fresh_rng.random()

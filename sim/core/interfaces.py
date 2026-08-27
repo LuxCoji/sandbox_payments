@@ -116,7 +116,14 @@ class DeviceStatus(enum.Enum):
 
 @dataclass(frozen=True)
 class AccountSnapshot:
-    """Immutable view of an account, as visible to its owner."""
+    """Immutable view of an account.
+
+    `owner_id` is the real identity for the owner's own view (actor_role in
+    USER/MERCHANT/RED_AGENT). For roles with cross-account visibility
+    (BANK_OPS/RISK_ANALYST/BLUE_AGENT), WorldEngine.get_world_view() replaces
+    it with a stable pseudonymous hash so no other actor's raw ID leaks
+    through the snapshot — see the PII masking rules on WorldEngine.
+    """
     account_id: str                          # UUIDv7
     account_type: AccountType
     balance_paise: int                       # INR paise (₹500.50 = 50050)
@@ -126,6 +133,7 @@ class AccountSnapshot:
     daily_tx_count: int
     daily_tx_volume_paise: int
     linked_device_ids: tuple[str, ...]
+    owner_id: str = ""                       # real ID (own view) or pseudonymous hash (masked view)
     merchant_category_code: str | None = None  # MCC, only for MERCHANT accounts
 
 
@@ -264,6 +272,24 @@ class WorldEngine(Protocol):
 
     def get_state_hash(self) -> str:
         """Compute deterministic SHA-256 digest of canonical aggregate state."""
+        ...
+
+    def create_account(
+        self,
+        account_id: str,
+        owner_id: str,
+        account_type: AccountType,
+        initial_balance_paise: int,
+        kyc_level: int,
+    ) -> None:
+        """Genesis-create an account (population bootstrapping, not a Command).
+
+        Unlike execute_command(), there's no TransactionType for account
+        creation — but this still goes through the same Emit -> Append to
+        ChronoDAG -> Apply pipeline as execute_command(), so genesis events
+        are persisted and replay-consistent like any other domain event.
+        The caller (population subsystem) generates account_id deterministically.
+        """
         ...
 
     @property

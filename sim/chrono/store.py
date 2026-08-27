@@ -13,6 +13,7 @@ from sim.chrono.interfaces import (
     StateDiff,
     StoredEvent,
 )
+from sim.observability import FORKS_CREATED, traced
 
 
 class PostgresChronoDAG(ChronoDAG):
@@ -114,6 +115,7 @@ class PostgresChronoDAG(ChronoDAG):
                 (event.seq_num, event.branch_id, event.seq_num)
             )
 
+    @traced("ChronoDAG.create_checkpoint")
     def create_checkpoint(
         self,
         branch_id: str,
@@ -201,6 +203,7 @@ class PostgresChronoDAG(ChronoDAG):
         lineage.reverse()
         return lineage
 
+    @traced("ChronoDAG.fork")
     def fork(
         self,
         checkpoint_id: str,
@@ -248,8 +251,10 @@ class PostgresChronoDAG(ChronoDAG):
                     json.dumps(branch.metadata)
                 )
             )
+            FORKS_CREATED.inc()
             return branch
 
+    @traced("ChronoDAG.checkout")
     def checkout(self, branch_id: str) -> ReplayContext:
         """Restore state from the latest checkpoint on a branch and return pending events to replay."""
         lineage = self._resolve_lineage(branch_id)

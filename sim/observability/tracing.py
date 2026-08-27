@@ -13,7 +13,9 @@ def setup_tracing(service_name: str = "finsim") -> None:
     resource = Resource.create({"service.name": service_name})
     provider = TracerProvider(resource=resource)
     
-    # Configure OTLP Exporter (defaults to localhost:4317 which matches Jaeger in docker-compose)
+    # OTLPSpanExporter reads OTEL_EXPORTER_OTLP_ENDPOINT from the environment
+    # (see .env) — production points this at Grafana Cloud's OTLP gateway,
+    # not a local Jaeger instance.
     exporter = OTLPSpanExporter()
     processor = BatchSpanProcessor(exporter)
     provider.add_span_processor(processor)

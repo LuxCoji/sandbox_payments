@@ -145,6 +145,9 @@ class Account:
         return None
 
     def apply_event(self, event: DomainEvent) -> None:
+        # Note: rejection/failure events (TransferRejected, PaymentDeclined,
+        # AccountFreezeFailed, etc.) intentionally have no case below — a
+        # rejection never mutates account state, only success events do.
         # First check if we need to reset counters (if this is a transaction)
         if isinstance(event, (AccountDebited, AccountCredited)):
             self._maybe_reset_daily_counters(event.sim_time_ns, dry_run=True)
@@ -179,6 +182,7 @@ class Account:
             daily_tx_count=self.daily_tx_count,
             daily_tx_volume_paise=self.daily_tx_volume_paise,
             linked_device_ids=tuple(sorted(self.linked_device_ids)),
+            owner_id=self.owner_id,
             merchant_category_code=self.merchant_category_code,
         )
 

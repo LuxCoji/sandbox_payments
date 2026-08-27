@@ -26,15 +26,15 @@ As established in `initial_plan.md`, the platform is divided across three parall
 | Subsystem | Location | Status |
 | :--- | :--- | :--- |
 | **Core Contracts** | `sim/core/interfaces.py`, `sim/core/events.py` | Defined (Contracts) |
-| **Core Engine** | `sim/core/engine.py`, `sim/core/*.py` | Pending (Person 1) |
-| **Scheduler** | `sim/scheduler/rng.py`, `sim/scheduler/env.py` | Implemented (19 tests passing) |
+| **Core Engine** | `sim/core/engine.py`, `sim/core/*.py` | Implemented — ChronoDAG-wired, all 10 TransactionTypes handled |
+| **Scheduler** | `sim/scheduler/rng.py`, `sim/scheduler/env.py` | Implemented |
 | **Gateway Contracts** | `sim/gateway/interfaces.py` | Defined (Contracts) |
-| **Gateway Implementation** | `sim/gateway/registry.py`, `sim/gateway/policy.py` | Pending (Person 1) |
+| **Gateway Implementation** | `sim/gateway/registry.py`, `sim/gateway/policy.py` | Implemented — LangGraph adapter and token-bucket rate limiting still pending |
 | **Population Contracts** | `sim/population/interfaces.py` | Defined (Contracts) |
-| **Population Implementation** | `sim/population/*.py`, `scripts/calibrate.py` | **Implemented (10 tests passing, Person 2)** |
+| **Population Implementation** | `sim/population/*.py`, `scripts/calibrate.py` | Implemented |
 | **Chrono Contracts** | `sim/chrono/interfaces.py` | Defined (Contracts) |
-| **Chrono Implementation** | `sim/chrono/*.py` | Pending (Person 3) |
-| **Observability** | `sim/observability/*.py` | Pending (Person 3) |
+| **Chrono Implementation** | `sim/chrono/*.py` | Implemented (PostgreSQL-backed) |
+| **Observability** | `sim/observability/*.py` | Implemented — traces/metrics wired to key entrypoints, exported to Grafana Cloud |
 
 ---
 

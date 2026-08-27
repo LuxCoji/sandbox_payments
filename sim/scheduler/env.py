@@ -1,7 +1,9 @@
-"""SimulationEnv – thin wrapper around simpy.Environment.
+"""SimulationEnv – discrete-event scheduling with explicit priority ordering.
 
-Provides discrete-event scheduling with explicit priority ordering.
-Direct imports of `simpy` outside this module are strictly prohibited.
+Implemented directly on `heapq` (not simpy — the `simpy` dependency was
+removed; this module never used it, despite what its earlier docstring
+claimed). Direct imports of `simpy` outside this module are strictly
+prohibited (enforced by import-linter) as a defensive guard.
 """
 from __future__ import annotations
 
@@ -35,7 +37,8 @@ class SimulationEnv:
     (time_ns, priority, sequence). Provides step-by-step or
     run-until-time execution.
 
-    This is the ONLY module allowed to use simpy internals.
+    This is the ONLY module allowed to import simpy (it doesn't — see the
+    module docstring — but the import-linter contract still guards this).
     All other modules schedule events through the WorldEngine.
     """
 

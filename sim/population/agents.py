@@ -57,13 +57,18 @@ class PopulationManager:
         return tuple(self._users + self._merchants)
 
     def create_population(
-        self, num_users: int = 50, num_merchants: int = 10
+        self, num_users: int = 50, num_merchants: int = 10, engine: Any = None
     ) -> tuple[AgentEntity, ...]:
         """Batch initialize user and merchant agents deterministically.
 
         Args:
             num_users: Number of retail user agents to spawn.
             num_merchants: Number of merchant agents to spawn.
+            engine: If given, each agent's account is genesis-created in the
+                engine via WorldEngine.create_account() so it actually exists
+                in aggregate state (and is visible via get_world_view()) —
+                without this, agents are scheduled but propose_actions()
+                always sees an empty account list and produces no intents.
 
         Returns:
             Tuple of all generated AgentEntity instances.
@@ -74,7 +79,7 @@ class PopulationManager:
         # 1. Create Merchants first (so users have merchants to transact with)
         for i in range(num_merchants):
             merchant_id = _generate_deterministic_uuid(self._root_rng)
-            rng = self._root_rng.spawn_for_entity("merchant", merchant_id)
+            rng = self._behaviour_model.get_entity_rng(merchant_id, "merchant")
             init_data = self._behaviour_model.initialize_entity(
                 merchant_id, "merchant", rng
             )
@@ -82,10 +87,11 @@ class PopulationManager:
             device_id = _generate_deterministic_uuid(rng)
             init_bal = int(str(init_data.get("initial_balance_paise", 0)))
             init_kyc = int(str(init_data.get("kyc_level", 3)))
+            account_id = str(init_data["account_id"])
             merchant = AgentEntity(
                 entity_id=merchant_id,
                 role=ActorRole.MERCHANT,
-                account_id=str(init_data["account_id"]),
+                account_id=account_id,
                 initial_balance_paise=init_bal,
                 kyc_level=init_kyc,
                 linked_device_ids=(device_id,),
@@ -94,11 +100,17 @@ class PopulationManager:
                 settlement_rail=str(init_data.get("settlement_rail", "UPI")),
             )
             self._merchants.append(merchant)
+            if engine is not None:
+                engine.create_account(
+                    account_id=account_id, owner_id=merchant_id,
+                    account_type=init_data["account_type"],
+                    initial_balance_paise=init_bal, kyc_level=init_kyc,
+                )
 
         # 2. Create Users
         for i in range(num_users):
             user_id = _generate_deterministic_uuid(self._root_rng)
-            rng = self._root_rng.spawn_for_entity("user", user_id)
+            rng = self._behaviour_model.get_entity_rng(user_id, "user")
             init_data = self._behaviour_model.initialize_entity(
                 user_id, "user", rng
             )
@@ -106,15 +118,22 @@ class PopulationManager:
             device_id = _generate_deterministic_uuid(rng)
             init_bal = int(str(init_data.get("initial_balance_paise", 0)))
             init_kyc = int(str(init_data.get("kyc_level", 0)))
+            account_id = str(init_data["account_id"])
             user = AgentEntity(
                 entity_id=user_id,
                 role=ActorRole.USER,
-                account_id=str(init_data["account_id"]),
+                account_id=account_id,
                 initial_balance_paise=init_bal,
                 kyc_level=init_kyc,
                 linked_device_ids=(device_id,),
             )
             self._users.append(user)
+            if engine is not None:
+                engine.create_account(
+                    account_id=account_id, owner_id=user_id,
+                    account_type=init_data["account_type"],
+                    initial_balance_paise=init_bal, kyc_level=init_kyc,
+                )
 
         return self.all_agents
 
