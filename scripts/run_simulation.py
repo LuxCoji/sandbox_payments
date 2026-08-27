@@ -17,12 +17,15 @@ def run_seed(args: argparse.Namespace) -> None:
     from sim.population.behaviour import PopulationBehaviourModel
     import os
 
-    config = SimConfig(
-        seed=args.seed, 
-        num_users=args.users, 
-        sim_duration_days=max(1, int(args.duration_hours / 24)),
-        db_url=args.db_url
-    )
+    kwargs = {
+        "seed": args.seed, 
+        "num_users": args.users, 
+        "sim_duration_days": max(1, int(args.duration_hours / 24)),
+    }
+    if args.db_url:
+        kwargs["db_url"] = args.db_url
+        
+    config = SimConfig(**kwargs)
     
     engine, gateway, dag = build_simulation(config)
     
@@ -79,7 +82,7 @@ def diff_branches(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="FinSim CLI Runner (Adversarial Sandbox)")
-    parser.add_argument("--db-url", type=str, default="postgresql://postgres:postgres@localhost:5432/finsim", help="PostgreSQL connection URL")
+    parser.add_argument("--db-url", type=str, help="PostgreSQL connection URL (overrides FINSIM_DB_URL from .env)")
     parser.add_argument("--metrics-port", type=int, default=8000, help="Port for Prometheus metrics")
     
     subparsers = parser.add_subparsers(dest="command", required=True)
