@@ -29,6 +29,9 @@ export default function SandboxPanel({ branches, accounts, onForked, selectedBra
     try {
       const b = await api.fork("main", forkName || "chaos-branch");
       onForked(b.branch_id);
+    } catch (e) {
+      console.error("Failed to fork:", e);
+      alert(String(e));
     } finally {
       setBusy(false);
     }
@@ -43,6 +46,9 @@ export default function SandboxPanel({ branches, accounts, onForked, selectedBra
       } else {
         await api.chaos(sandboxBranch, action, { account_id: targetAccount });
       }
+    } catch (e) {
+      console.error("Chaos action failed:", e);
+      alert(String(e));
     } finally {
       setBusy(false);
     }
@@ -53,6 +59,9 @@ export default function SandboxPanel({ branches, accounts, onForked, selectedBra
     setBusy(true);
     try {
       setDiffResult(await api.diff(diffB, sandboxBranch));
+    } catch (e) {
+      console.error("Diff failed:", e);
+      alert(String(e));
     } finally {
       setBusy(false);
     }

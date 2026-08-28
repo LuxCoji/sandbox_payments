@@ -77,18 +77,18 @@ async function j<T>(res: Response): Promise<T> {
 }
 
 export const api = {
-  branches: () => fetch(`${BASE}/branches`).then((r) => j<BranchNode[]>(r)),
-  branchState: (id: string) => fetch(`${BASE}/branches/${id}/state`).then((r) => j<BranchState>(r)),
-  accounts: (id: string) => fetch(`${BASE}/branches/${id}/accounts`).then((r) => j<AccountRow[]>(r)),
-  accountEvents: (branchId: string, accountId: string) =>
-    fetch(`${BASE}/branches/${branchId}/accounts/${accountId}/events`).then((r) => j<SimEvent[]>(r)),
+  branches: (init?: RequestInit) => fetch(`${BASE}/branches`, init).then((r) => j<BranchNode[]>(r)),
+  branchState: (id: string, init?: RequestInit) => fetch(`${BASE}/branches/${id}/state`, init).then((r) => j<BranchState>(r)),
+  accounts: (id: string, init?: RequestInit) => fetch(`${BASE}/branches/${id}/accounts`, init).then((r) => j<AccountRow[]>(r)),
+  accountEvents: (branchId: string, accountId: string, init?: RequestInit) =>
+    fetch(`${BASE}/branches/${branchId}/accounts/${accountId}/events`, init).then((r) => j<SimEvent[]>(r)),
   fork: (parentBranchId: string, name: string, checkpointId?: string) =>
     fetch(`${BASE}/branches/fork`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ parent_branch_id: parentBranchId, name, checkpoint_id: checkpointId ?? null }),
     }).then((r) => j<BranchState>(r)),
-  checkpoints: (id: string) => fetch(`${BASE}/branches/${id}/checkpoints`).then((r) => j<Checkpoint[]>(r)),
+  checkpoints: (id: string, init?: RequestInit) => fetch(`${BASE}/branches/${id}/checkpoints`, init).then((r) => j<Checkpoint[]>(r)),
   makeCheckpoint: (id: string) =>
     fetch(`${BASE}/branches/${id}/checkpoint`, { method: "POST" }).then((r) => j<Checkpoint>(r)),
   breakdown: (id: string) => fetch(`${BASE}/branches/${id}/breakdown`).then((r) => j<Record<string, number>>(r)),

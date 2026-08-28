@@ -152,8 +152,8 @@ class PopulationManager:
 
     def start_agent_loops(self, engine: Any) -> None:
         """Schedule the initial action loop for all user and merchant agents."""
-        from sim.scheduler.env import ScheduledEvent
         from sim.core.interfaces import TransactionType
+        from sim.scheduler.env import ScheduledEvent
 
         pop_size = len(self._users) + len(self._merchants)
         for agent in self._users + self._merchants:
@@ -169,9 +169,10 @@ class PopulationManager:
 
     def _agent_step(self, engine: Any, agent_id: str, role: ActorRole) -> None:
         """Execute one step of an agent's behaviour and schedule the next."""
+        import uuid
+
         from sim.core.interfaces import Command, TransactionType
         from sim.scheduler.env import ScheduledEvent
-        import uuid
 
         # 1. Observe the world
         world_view = engine.get_world_view(actor_id=agent_id, actor_role=role)

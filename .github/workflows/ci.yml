@@ -50,4 +50,5 @@ jobs:
       - name: Full test suite
         run: uv run pytest -xvs
         env:
-          DATABASE_URL: postgresql://finsim:finsim_test@localhost:5432/finsim_test
+          FINSIM_DB_URL: postgresql://finsim:finsim_test@localhost:5432/finsim_test
+          FINSIM_CHRONO_BACKEND: postgres

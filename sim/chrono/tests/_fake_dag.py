@@ -8,7 +8,7 @@ Postgres instance.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from sim.chrono.interfaces import (
     Branch,
@@ -42,16 +42,22 @@ class InMemoryChronoDAG:
     # ── Writes ───────────────────────────────────────────────────────────
 
     def save_event(self, event: StoredEvent) -> None:
-        self._events.append(event)
-        branch = self._branches[event.branch_id]
-        if event.seq_num > branch.head_seq_num:
-            self._branches[event.branch_id] = Branch(
+        self.save_events([event])
+
+    def save_events(self, events: list[StoredEvent]) -> None:
+        for event in events:
+            self._events.append(event)
+
+        if events:
+            last_event = max(events, key=lambda e: e.seq_num)
+            branch = self._branches[last_event.branch_id]
+            self._branches[last_event.branch_id] = Branch(
                 branch_id=branch.branch_id,
                 parent_checkpoint_id=branch.parent_checkpoint_id,
                 parent_branch_id=branch.parent_branch_id,
                 created_at_ns=branch.created_at_ns,
                 seed_offset=branch.seed_offset,
-                head_seq_num=event.seq_num,
+                head_seq_num=max(branch.head_seq_num, last_event.seq_num),
                 metadata=branch.metadata,
             )
 

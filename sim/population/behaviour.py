@@ -8,7 +8,6 @@ Implements the BehaviourModel protocol:
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING
 
 from sim.core.interfaces import (
     AccountStatus,
@@ -20,14 +19,12 @@ from sim.core.interfaces import (
 )
 from sim.observability import traced
 from sim.population.interfaces import (
-    BehaviourModel,
     CalibratedParams,
     Intent,
 )
 from sim.population.profiles import ProfileSampler
 from sim.population.temporal import TemporalModel
 from sim.scheduler.rng import DeterministicRNG
-
 
 # Canonical entity-RNG keying scheme: "user"/"merchant" (lowercase), matching
 # PopulationManager.create_population's spawn_for_entity() calls. Every RNG

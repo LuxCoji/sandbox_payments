@@ -81,6 +81,8 @@ class ToolGatewayImpl:
             )
 
         except Exception as e:
+            import logging
+            logging.getLogger(__name__).exception("Tool execution failed: %s", tool_name)
             return ToolResult(
                 success=False, tool_name=tool_name, error_code="INTERNAL_ERROR",
                 error_message=str(e)

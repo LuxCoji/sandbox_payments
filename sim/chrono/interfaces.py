@@ -101,6 +101,10 @@ class ChronoDAG(Protocol):
         """Append an event to the current branch log."""
         ...
 
+    def save_events(self, events: list[StoredEvent]) -> None:
+        """Append multiple events in a single transaction."""
+        ...
+
     def create_checkpoint(
         self,
         branch_id: str,

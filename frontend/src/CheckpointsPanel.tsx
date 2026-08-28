@@ -15,13 +15,31 @@ export default function CheckpointsPanel({ branch, onForked }: Props) {
 
   useEffect(() => {
     if (!branch) return;
+    const controller = new AbortController();
     let cancelled = false;
-    const load = () => api.checkpoints(branch.branch_id).then((cs) => !cancelled && setCheckpoints(cs));
+    let timer: number;
+
+    const load = () => {
+      api.checkpoints(branch.branch_id, { signal: controller.signal })
+        .then((cs) => {
+          if (!cancelled) {
+            setCheckpoints(cs);
+            timer = setTimeout(load, 4000) as unknown as number;
+          }
+        })
+        .catch((e) => {
+          if (!cancelled && e.name !== "AbortError") {
+            console.error("Checkpoints fetch failed:", e);
+            timer = setTimeout(load, 4000) as unknown as number;
+          }
+        });
+    };
     load();
-    const id = setInterval(load, 4000);
+
     return () => {
       cancelled = true;
-      clearInterval(id);
+      controller.abort();
+      clearTimeout(timer);
     };
   }, [branch?.branch_id]);
 
@@ -33,6 +51,9 @@ export default function CheckpointsPanel({ branch, onForked }: Props) {
     try {
       const cp = await api.makeCheckpoint(branch.branch_id);
       setCheckpoints((prev) => [...prev, cp]);
+    } catch (e) {
+      console.error("Failed to snapshot:", e);
+      alert(String(e));
     } finally {
       setBusy(false);
     }
@@ -44,6 +65,9 @@ export default function CheckpointsPanel({ branch, onForked }: Props) {
       const name = nameById[cp.checkpoint_id] || `${branch!.name}-@${cp.event_number}`;
       const b = await api.fork(branch!.branch_id, name, cp.checkpoint_id);
       onForked(b.branch_id);
+    } catch (e) {
+      console.error("Failed to fork:", e);
+      alert(String(e));
     } finally {
       setBusy(false);
     }

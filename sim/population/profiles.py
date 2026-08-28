@@ -52,7 +52,7 @@ class ProfileSampler:
         total_freq = sum(p.frequency for p in profiles)
         probabilities = [p.frequency / total_freq for p in profiles]
         selected = rng.choice(profiles, p=probabilities)
-        return cast(ActionProfile, selected)
+        return cast("ActionProfile", selected)
 
     def sample_repetition_count(
         self, profile: ActionProfile, rng: DeterministicRNG

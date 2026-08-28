@@ -22,7 +22,7 @@ class RateLimiter:
         self, actor_id: str, tool_name: str, sim_time_ns: float,
         limit_per_step: int | None, limit_per_day: int | None,
     ) -> str | None:
-        
+
         current_step = int(sim_time_ns)
         if current_step != self._current_step_time:
             self._step_counters.clear()
@@ -34,18 +34,20 @@ class RateLimiter:
             self._current_day = current_day
 
         key = (actor_id, tool_name)
+        step_count = self._step_counters.get(key, 0)
+        day_count = self._day_counters.get(key, 0)
+
+        if limit_per_step is not None and step_count >= limit_per_step:
+            return f"Rate limit exceeded: {limit_per_step} per step"
+
+        if limit_per_day is not None and day_count >= limit_per_day:
+            return f"Rate limit exceeded: {limit_per_day} per day"
 
         if limit_per_step is not None:
-            count = self._step_counters.get(key, 0)
-            if count >= limit_per_step:
-                return f"Rate limit exceeded: {limit_per_step} per step"
-            self._step_counters[key] = count + 1
+            self._step_counters[key] = step_count + 1
 
         if limit_per_day is not None:
-            count = self._day_counters.get(key, 0)
-            if count >= limit_per_day:
-                return f"Rate limit exceeded: {limit_per_day} per day"
-            self._day_counters[key] = count + 1
+            self._day_counters[key] = day_count + 1
 
         return None
 

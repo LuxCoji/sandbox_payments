@@ -64,7 +64,7 @@ def calibrate_from_csv(data_dir: str | Path) -> CalibratedParams:
     if not profiles_csv.exists():
         raise FileNotFoundError(f"Missing {profiles_csv}")
 
-    with open(profiles_csv, "r", encoding="utf-8") as f:
+    with open(profiles_csv, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             tx_type = TransactionType(row["stepType"].strip())
@@ -96,7 +96,7 @@ def calibrate_from_csv(data_dir: str | Path) -> CalibratedParams:
     if not balances_csv.exists():
         raise FileNotFoundError(f"Missing {balances_csv}")
 
-    with open(balances_csv, "r", encoding="utf-8") as f:
+    with open(balances_csv, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             min_balance_paise = int(round(float(row["minBalance"]) * 100))
@@ -110,7 +110,7 @@ def calibrate_from_csv(data_dir: str | Path) -> CalibratedParams:
     if not max_occ_csv.exists():
         raise FileNotFoundError(f"Missing {max_occ_csv}")
 
-    with open(max_occ_csv, "r", encoding="utf-8") as f:
+    with open(max_occ_csv, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             tx_type = TransactionType(row["stepType"].strip())
@@ -124,7 +124,7 @@ def calibrate_from_csv(data_dir: str | Path) -> CalibratedParams:
     if not agg_csv.exists():
         raise FileNotFoundError(f"Missing {agg_csv}")
 
-    with open(agg_csv, "r", encoding="utf-8") as f:
+    with open(agg_csv, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             day_idx = int(row["day"]) - 1  # 1-7 -> 0-6
@@ -189,7 +189,7 @@ def save_calibrated_params(params: CalibratedParams, output_file: str | Path) ->
 def load_calibrated_params(input_file: str | Path) -> CalibratedParams:
     """Deserialize CalibratedParams from JSON."""
     in_path = Path(input_file)
-    with open(in_path, "r", encoding="utf-8") as f:
+    with open(in_path, encoding="utf-8") as f:
         data = json.load(f)
 
     profiles_by_type: dict[TransactionType, tuple[ActionProfile, ...]] = {

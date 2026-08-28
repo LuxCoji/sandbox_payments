@@ -39,14 +39,15 @@ def build_simulation(config: SimConfig) -> tuple[WorldEngineImpl, ToolGatewayImp
     return engine, gateway, chrono
 
 def _register_core_tools(registry: ToolRegistry, engine: WorldEngineImpl) -> None:
-    from sim.gateway.interfaces import ToolSpec, Capability
-    from sim.core.interfaces import Command, TransactionType
     import uuid
+
+    from sim.core.interfaces import Command, TransactionType
+    from sim.gateway.interfaces import Capability, ToolSpec
 
     # 1. create_account
     def create_account_handler(context, params, engine):
         return []
-    
+
     registry.register_tool(
         ToolSpec("create_account", "Create a new account", (), frozenset()),
         create_account_handler
@@ -64,7 +65,7 @@ def _register_core_tools(registry: ToolRegistry, engine: WorldEngineImpl) -> Non
             idempotency_key=str(params.get("idempotency_key", uuid.uuid4()))
         )
         return engine.execute_command(cmd).events
-        
+
     registry.register_tool(
         ToolSpec("transfer_funds", "Transfer funds", (Capability.TRANSFER_FUNDS,), frozenset({"events"})),
         transfer_funds_handler
@@ -97,7 +98,7 @@ def _register_core_tools(registry: ToolRegistry, engine: WorldEngineImpl) -> Non
             if acc.account_id == acc_id:
                 return [acc]
         return []
-        
+
     registry.register_tool(
         ToolSpec("inspect_account", "Inspect account details", (Capability.VIEW_OWN_ACCOUNT,), frozenset({"events"})),
         inspect_account_handler

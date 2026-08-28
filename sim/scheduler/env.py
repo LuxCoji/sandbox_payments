@@ -22,7 +22,7 @@ class ScheduledEvent:
     Ordering: (time_ns, priority, sequence) — lower values are processed first.
     Priority 0 is highest priority.
     """
-    time_ns: float
+    time_ns: int
     priority: int = 0
     sequence: int = field(default=0, compare=True)
     handler: Callable[..., Any] = field(compare=False, default=lambda: None)
@@ -42,14 +42,14 @@ class SimulationEnv:
     All other modules schedule events through the WorldEngine.
     """
 
-    def __init__(self, start_time_ns: float = 0.0) -> None:
-        self._now: float = start_time_ns
+    def __init__(self, start_time_ns: int = 0) -> None:
+        self._now: int = start_time_ns
         self._queue: list[ScheduledEvent] = []
         self._seq_counter: int = 0
         self._step_count: int = 0
 
     @property
-    def now(self) -> float:
+    def now(self) -> int:
         """Current simulation time in nanoseconds (read-only)."""
         return self._now
 
@@ -126,7 +126,7 @@ class SimulationEnv:
         event.handler(**event.payload)
         return event
 
-    def run(self, until: float | None = None) -> int:
+    def run(self, until: int | None = None) -> int:
         """Advance simulation by processing events.
 
         Args:

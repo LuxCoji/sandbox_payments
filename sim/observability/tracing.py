@@ -1,5 +1,6 @@
 import functools
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
@@ -12,14 +13,14 @@ def setup_tracing(service_name: str = "finsim") -> None:
     """Initialize OpenTelemetry tracing with OTLP export."""
     resource = Resource.create({"service.name": service_name})
     provider = TracerProvider(resource=resource)
-    
+
     # OTLPSpanExporter reads OTEL_EXPORTER_OTLP_ENDPOINT from the environment
     # (see .env) — production points this at Grafana Cloud's OTLP gateway,
     # not a local Jaeger instance.
     exporter = OTLPSpanExporter()
     processor = BatchSpanProcessor(exporter)
     provider.add_span_processor(processor)
-    
+
     trace.set_tracer_provider(provider)
 
 

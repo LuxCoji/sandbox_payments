@@ -13,11 +13,11 @@ from sim.core.interfaces import AccountType, ActorRole
 def test_engine_hash_determinism(seed: int) -> None:
     from sim.scheduler.env import SimulationEnv
     from sim.scheduler.rng import DeterministicRNG
-    
+
     env = SimulationEnv()
     rng = DeterministicRNG.from_seed(42)
     engine1 = WorldEngineImpl(env, rng, branch_id="main")
-    
+
     env2 = SimulationEnv()
     rng2 = DeterministicRNG.from_seed(42)
     engine2 = WorldEngineImpl(env2, rng2, branch_id="main")

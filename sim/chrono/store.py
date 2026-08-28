@@ -73,7 +73,7 @@ class PostgresChronoDAG(ChronoDAG):
             cur.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_branch_seq ON events(branch_id, seq_num)"
             )
-            
+
             # Ensure 'main' root branch exists
             cur.execute("SELECT 1 FROM branches WHERE branch_id = 'main'")
             if not cur.fetchone():
@@ -88,31 +88,41 @@ class PostgresChronoDAG(ChronoDAG):
                 )
 
     def save_event(self, event: StoredEvent) -> None:
-        """Append an event to the current branch log."""
-        with self.conn.cursor() as cur:
-            cur.execute(
-                '''
-                INSERT INTO events (
-                    event_id, branch_id, seq_num, event_type, sim_time_ns,
-                    actor_id, payload, causation_id, correlation_id
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ''',
-                (
-                    event.event_id,
-                    event.branch_id,
-                    event.seq_num,
-                    event.event_type,
-                    event.sim_time_ns,
-                    event.actor_id,
-                    json.dumps(event.payload),
-                    event.causation_id,
-                    event.correlation_id,
+        self.save_events([event])
+
+    def save_events(self, events: list[StoredEvent]) -> None:
+        """Append multiple events to the current branch log in a single transaction."""
+        if not events:
+            return
+
+        with self.conn.transaction(), self.conn.cursor() as cur:
+            for event in events:
+                cur.execute(
+                    '''
+                        INSERT INTO events (
+                            event_id, branch_id, seq_num, event_type, sim_time_ns,
+                            actor_id, payload, causation_id, correlation_id
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ''',
+                    (
+                        event.event_id,
+                        event.branch_id,
+                        event.seq_num,
+                        event.event_type,
+                        event.sim_time_ns,
+                        event.actor_id,
+                        json.dumps(event.payload),
+                        event.causation_id,
+                        event.correlation_id,
+                    )
                 )
-            )
+
             # Fast-forward the branch head if this is the newest event
+            # Since events are appended, the last one has the highest seq_num
+            last_event = max(events, key=lambda e: e.seq_num)
             cur.execute(
                 "UPDATE branches SET head_seq_num = %s WHERE branch_id = %s AND head_seq_num < %s",
-                (event.seq_num, event.branch_id, event.seq_num)
+                (last_event.seq_num, last_event.branch_id, last_event.seq_num)
             )
 
     @traced("ChronoDAG.create_checkpoint")
@@ -128,7 +138,7 @@ class PostgresChronoDAG(ChronoDAG):
     ) -> Checkpoint:
         """Capture state snapshot at the given event number."""
         checkpoint_id = str(uuid.uuid4())
-        
+
         checkpoint = Checkpoint(
             checkpoint_id=checkpoint_id,
             branch_id=branch_id,
@@ -139,7 +149,7 @@ class PostgresChronoDAG(ChronoDAG):
             rng_state=rng_state,
             metadata=metadata or {},
         )
-        
+
         with self.conn.cursor() as cur:
             cur.execute(
                 '''
@@ -168,14 +178,14 @@ class PostgresChronoDAG(ChronoDAG):
         """
         lineage = []
         current_branch = branch_id
-        
+
         with self.conn.cursor() as cur:
             cur.execute("SELECT head_seq_num FROM branches WHERE branch_id = %s", (current_branch,))
             row = cur.fetchone()
             if not row:
                 raise ValueError(f"Branch {branch_id} not found")
             current_end = row[0]
-            
+
             while True:
                 cur.execute(
                     '''
@@ -188,9 +198,9 @@ class PostgresChronoDAG(ChronoDAG):
                 parent_info = cur.fetchone()
                 if not parent_info:
                     break
-                    
+
                 parent_branch_id, fork_event_number = parent_info
-                
+
                 if parent_branch_id is None:
                     # Root branch ('main')
                     lineage.append((current_branch, 0, current_end))
@@ -199,7 +209,7 @@ class PostgresChronoDAG(ChronoDAG):
                     lineage.append((current_branch, fork_event_number + 1, current_end))
                     current_branch = parent_branch_id
                     current_end = fork_event_number
-                    
+
         lineage.reverse()
         return lineage
 
@@ -218,12 +228,12 @@ class PostgresChronoDAG(ChronoDAG):
             cp_info = cur.fetchone()
             if not cp_info:
                 raise ValueError(f"Checkpoint {checkpoint_id} not found")
-                
+
             parent_branch_id, fork_event_number, created_at_ns = cp_info
-            
+
             # Simple deterministic seed_offset derivation based on the branch name hash
             seed_offset = hash(branch_id) % (2**31 - 1)
-            
+
             branch = Branch(
                 branch_id=branch_id,
                 parent_checkpoint_id=checkpoint_id,
@@ -233,7 +243,7 @@ class PostgresChronoDAG(ChronoDAG):
                 head_seq_num=fork_event_number,
                 metadata=metadata or {},
             )
-            
+
             cur.execute(
                 '''
                 INSERT INTO branches (
@@ -259,7 +269,7 @@ class PostgresChronoDAG(ChronoDAG):
         """Restore state from the latest checkpoint on a branch and return pending events to replay."""
         lineage = self._resolve_lineage(branch_id)
         latest_cp = None
-        
+
         with self.conn.cursor() as cur:
             # Look backwards through the lineage for the most recent checkpoint
             for branch, b_start, b_end in reversed(lineage):
@@ -287,10 +297,10 @@ class PostgresChronoDAG(ChronoDAG):
                         metadata=row[7]
                     )
                     break
-            
+
             if not latest_cp:
                 raise ValueError(f"No checkpoint found in lineage for {branch_id}")
-                
+
             # Fetch branch details
             cur.execute("SELECT parent_checkpoint_id, parent_branch_id, created_at_ns, seed_offset, head_seq_num, metadata FROM branches WHERE branch_id = %s", (branch_id,))
             b_row = cur.fetchone()
@@ -303,10 +313,10 @@ class PostgresChronoDAG(ChronoDAG):
                 head_seq_num=b_row[4],
                 metadata=b_row[5]
             )
-            
+
             # Replay any events AFTER the checkpoint on this branch lineage
             pending_events = tuple(self.replay(branch_id, latest_cp.event_number + 1, branch_obj.head_seq_num))
-            
+
             return ReplayContext(
                 branch=branch_obj,
                 checkpoint=latest_cp,
@@ -328,24 +338,24 @@ class PostgresChronoDAG(ChronoDAG):
                         row = cur.fetchone()
                         if row: return json.loads(row[0])
                 return None
-                
+
             state_a = fetch_snapshot(branch_a)
             state_b = fetch_snapshot(branch_b)
-            
+
             if state_a is None or state_b is None:
                 raise ValueError(f"Checkpoints must exist on both branches at event {at_event} to compute diff.")
-                
+
         entities_added = []
         entities_removed = []
         entities_modified = []
-        
+
         # Assume state is dict[entity_type, dict[entity_id, dict[field, value]]]
         all_entity_types = set(state_a.keys()).union(state_b.keys())
-        
+
         for entity_type in all_entity_types:
             dict_a = state_a.get(entity_type, {})
             dict_b = state_b.get(entity_type, {})
-            
+
             for eid in set(dict_a.keys()).union(dict_b.keys()):
                 if eid in dict_b and eid not in dict_a:
                     entities_added.append(EntityDiff(entity_type, eid, ()))
@@ -364,7 +374,7 @@ class PostgresChronoDAG(ChronoDAG):
         # Compare event lineages up to at_event
         events_a = {e.event_id for e in self.replay(branch_a, 0, at_event)}
         events_b = {e.event_id for e in self.replay(branch_b, 0, at_event)}
-        
+
         return StateDiff(
             branch_a_id=branch_a,
             branch_b_id=branch_b,
@@ -380,13 +390,13 @@ class PostgresChronoDAG(ChronoDAG):
         """Retrieve a range of events from a branch, correctly resolving lineage."""
         lineage = self._resolve_lineage(branch_id)
         events = []
-        
+
         with self.conn.cursor() as cur:
             for branch, b_start, b_end in lineage:
                 # Find the intersection/overlap between the requested range and this branch's segment
                 overlap_start = max(from_event, b_start)
                 overlap_end = min(to_event, b_end)
-                
+
                 if overlap_start <= overlap_end:
                     cur.execute(
                         '''

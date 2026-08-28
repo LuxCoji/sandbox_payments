@@ -11,10 +11,8 @@ Verifies:
 """
 from __future__ import annotations
 
-import json
 import uuid
 from pathlib import Path
-from typing import Any
 
 from sim.core.interfaces import (
     AccountSnapshot,
@@ -33,7 +31,7 @@ from sim.core.interfaces import (
 )
 from sim.population.behaviour import PopulationBehaviourModel
 from sim.population.calibration import calibrate_from_csv, load_calibrated_params, save_calibrated_params
-from sim.population.interfaces import BehaviourModel, CalibratedParams, Intent
+from sim.population.interfaces import BehaviourModel, Intent
 from sim.scheduler.rng import DeterministicRNG
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "paysim"

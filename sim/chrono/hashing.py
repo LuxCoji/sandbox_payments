@@ -30,22 +30,22 @@ class IncrementalHasher:
     can be recomputed efficiently without re-serializing the entire world state
     every time a single account changes.
     """
-    
+
     def __init__(self) -> None:
         # Maps entity_type -> { entity_id -> entity_hash_string }
         self.entity_hashes: dict[str, dict[str, str]] = {}
-        
+
     def update_entity(self, entity_type: str, entity_id: str, entity_data: Any) -> None:
         """Update or delete the hash for a single entity."""
         if entity_type not in self.entity_hashes:
             self.entity_hashes[entity_type] = {}
-            
+
         if entity_data is None:
             # Handle deletion
             self.entity_hashes[entity_type].pop(entity_id, None)
         else:
             self.entity_hashes[entity_type][entity_id] = hash_object(entity_data)
-            
+
     def get_state_hash(self) -> str:
         """
         Compute the root hash of the entire state.
@@ -55,9 +55,9 @@ class IncrementalHasher:
         """
         aggregate_hashes = {}
         for entity_type, entities in self.entity_hashes.items():
-            # The dictionary `entities` maps ID -> Hash. 
+            # The dictionary `entities` maps ID -> Hash.
             # Hashing this dictionary ensures we detect any addition/removal or ID change.
             aggregate_hashes[entity_type] = hash_object(entities)
-            
+
         # Hash the dictionary of { entity_type: aggregate_hash } to get the root state hash.
         return hash_object(aggregate_hashes)

@@ -24,6 +24,7 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass
 
+from api.live_dag import LiveChronoDAG
 from sim.core.engine import WorldEngineImpl
 from sim.core.events import AccountCredited, AccountDebited, AccountFrozen, AccountStatusChanged
 from sim.core.interfaces import AccountStatus, ActorRole, Command, TransactionType
@@ -33,8 +34,6 @@ from sim.population.calibration import calibrate_from_csv
 from sim.population.interfaces import CalibratedParams
 from sim.scheduler.env import SimulationEnv
 from sim.scheduler.rng import DeterministicRNG
-
-from api.live_dag import LiveChronoDAG
 
 STEP_BATCH = 12          # events processed per tick
 TICK_SECONDS = 0.12      # pacing — keeps the feed watchable, not a firehose
@@ -111,7 +110,8 @@ class SimSession:
                         if processed is None:
                             break
                     if engine._seq_num - self._last_auto_checkpoint_seq >= AUTO_CHECKPOINT_INTERVAL:
-                        self.create_checkpoint("main")
+                        # Offload to a thread to avoid blocking the event loop with copy.deepcopy
+                        await asyncio.to_thread(self.create_checkpoint, "main")
                         self._last_auto_checkpoint_seq = engine._seq_num
                 except Exception:
                     logger.exception("main branch step loop crashed; pausing")
@@ -229,7 +229,7 @@ class SimSession:
             event_number=engine._seq_num,
             sim_time_ns=engine.sim_time_ns,
             state_hash=engine.get_state_hash(),
-            aggregate_snapshot=b"",
+            aggregate_snapshot=engine.get_canonical_state_bytes(),
             rng_state=engine._rng.get_state(),
         )
         self._checkpoint_snapshots[cp.checkpoint_id] = self._snapshot_engine_state(engine)
@@ -304,14 +304,13 @@ class SimSession:
             engine._persist_events([event])
             engine._apply_events([event])
         elif action == "unfreeze_account":
+            acc = engine._accounts[params["account_id"]]
             event = engine._create_event(
                 AccountStatusChanged, actor_id="sandbox-admin", account_id=params["account_id"],
+                old_status=acc.status, new_status=AccountStatus.ACTIVE
             )
-            # AccountStatusChanged is generic; Account.apply_event needs a status —
-            # simplest reliable path is to set ACTIVE directly then persist for the log.
-            acc = engine._accounts[params["account_id"]]
-            acc.status = AccountStatus.ACTIVE
             engine._persist_events([event])
+            engine._apply_events([event])
         elif action == "override_balance":
             account_id = params["account_id"]
             target_paise = int(params["balance_paise"])
@@ -355,7 +354,7 @@ class SimSession:
             eng = self.branches[bid].engine
             self.dag.create_checkpoint(
                 branch_id=bid, event_number=at_event, sim_time_ns=eng.sim_time_ns,
-                state_hash=eng.get_state_hash(), aggregate_snapshot=b"", rng_state=b"",
+                state_hash=eng.get_state_hash(), aggregate_snapshot=eng.get_canonical_state_bytes(), rng_state=b"",
             )
         d = self.dag.diff(branch_a, branch_b, at_event)
         return {

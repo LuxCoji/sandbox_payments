@@ -84,18 +84,28 @@ class LiveChronoDAG:
     # ── ChronoDAG protocol ─────────────────────────────────────────────
 
     def save_event(self, event: StoredEvent) -> None:
-        row = self._branches[event.branch_id]
-        row.events.append(event)
+        self.save_events([event])
+
+    def save_events(self, events: list[StoredEvent]) -> None:
+        if not events:
+            return
+
+        last_event = max(events, key=lambda e: e.seq_num)
+        row = self._branches[last_event.branch_id]
+
+        for event in events:
+            row.events.append(event)
+            self._broadcast(event)
+
         row.branch = Branch(
             branch_id=row.branch.branch_id,
             parent_checkpoint_id=row.branch.parent_checkpoint_id,
             parent_branch_id=row.branch.parent_branch_id,
             created_at_ns=row.branch.created_at_ns,
             seed_offset=row.branch.seed_offset,
-            head_seq_num=max(row.branch.head_seq_num, event.seq_num),
+            head_seq_num=max(row.branch.head_seq_num, last_event.seq_num),
             metadata=row.branch.metadata,
         )
-        self._broadcast(event)
 
     def create_checkpoint(
         self,

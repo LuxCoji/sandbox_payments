@@ -4,7 +4,7 @@ from opentelemetry import trace
 
 def get_logger(name: str) -> structlog.BoundLogger:
     """Return a structlog logger configured for JSON output with trace IDs."""
-    
+
     def add_trace_id(logger, method_name, event_dict):
         span = trace.get_current_span()
         if span and span.is_recording():
@@ -17,7 +17,7 @@ def get_logger(name: str) -> structlog.BoundLogger:
         import logging
         import sys
         logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(message)s")
-        
+
         structlog.configure(
             processors=[
                 structlog.stdlib.add_log_level,
@@ -30,5 +30,5 @@ def get_logger(name: str) -> structlog.BoundLogger:
             wrapper_class=structlog.stdlib.BoundLogger,
             cache_logger_on_first_use=True,
         )
-    
+
     return structlog.get_logger(name)

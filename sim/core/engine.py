@@ -25,9 +25,11 @@ from sim.core.events import (
     AccountCreated,
     AccountCredited,
     AccountDebited,
+    DailyCountersReset,
     DeviceRegistered,
     DomainEvent,
     FeeCharged,
+    GatewayStatusChanged,
     InterestAccrued,
     MerchantOnboarded,
     PaymentAuthorized,
@@ -38,6 +40,7 @@ from sim.core.events import (
     SettlementBatchCreated,
     TransferRejected,
 )
+from sim.core.gateway import GatewayEntity
 from sim.core.interfaces import (
     AccountSnapshot,
     AccountType,
@@ -50,11 +53,10 @@ from sim.core.interfaces import (
 )
 from sim.core.merchant import Merchant
 from sim.core.payment import Payment
+from sim.core.settlement import SettlementBatch
 from sim.observability import EVENT_LATENCY, EVENTS_PROCESSED, SCHEDULER_QUEUE_SIZE, traced
 
 if TYPE_CHECKING:
-    from sim.core.gateway import GatewayEntity
-    from sim.core.settlement import SettlementBatch
     from sim.scheduler.env import ScheduledEvent, SimulationEnv
     from sim.scheduler.rng import DeterministicRNG
 
@@ -140,7 +142,7 @@ class WorldEngineImpl:
     @traced("WorldEngine.execute_command")
     def execute_command(self, command: Command) -> CommandResult:
         if command.idempotency_key in self._processed_idempotency_keys:
-            return CommandResult(events=(), success=True)
+            return self._processed_idempotency_keys[command.idempotency_key]
 
         handler_name = {
             TransactionType.PAYMENT: "_execute_payment",
@@ -158,22 +160,34 @@ class WorldEngineImpl:
         if not handler_name:
             raise ValueError(f"Unsupported action type: {command.action_type}")
 
-        handler = getattr(self, handler_name)
-        events = handler(command)
+        events = []
+        events.extend(self._get_daily_reset_events(
+            [command.source_account_id or "", command.target_account_id or ""],
+            command.actor_id
+        ))
 
-        self._persist_events(events)
-        self._apply_events(events)
-        self._processed_idempotency_keys[command.idempotency_key] = None
-        if len(self._processed_idempotency_keys) > 10000:
-            self._processed_idempotency_keys.pop(next(iter(self._processed_idempotency_keys)))
+        handler = getattr(self, handler_name)
+        events.extend(handler(command))
+
+        if not events:
+            # Fallback if no logic happened (shouldn't really happen)
+            pass
+        else:
+            self._persist_events(events)
+            self._apply_events(events)
 
         rejection_types = {
             "PaymentDeclined", "TransferRejected", "RefundRejected",
             "AccountFreezeFailed", "PaymentTimeout",
         }
         success = len(events) > 0 and all(type(e).__name__ not in rejection_types for e in events)
+        result = CommandResult(events=tuple(events), success=success)
 
-        return CommandResult(events=tuple(events), success=success)
+        self._processed_idempotency_keys[command.idempotency_key] = result
+        if len(self._processed_idempotency_keys) > 10000:
+            self._processed_idempotency_keys.pop(next(iter(self._processed_idempotency_keys)))
+
+        return result
 
     def create_account(
         self,
@@ -194,7 +208,7 @@ class WorldEngineImpl:
         self._persist_events([event])
         self._apply_events([event])
 
-    def get_state_hash(self) -> str:
+    def get_canonical_state_bytes(self) -> bytes:
         canonical = {
             "accounts": {k: v.to_canonical_dict() for k, v in sorted(self._accounts.items())},
             "devices": {k: v.to_canonical_dict() for k, v in sorted(self._devices.items())},
@@ -205,7 +219,10 @@ class WorldEngineImpl:
             "sim_time_ns": self._env.now,
         }
         raw = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
-        state_bytes = raw.encode() + self._rng.get_state()
+        return raw.encode()
+
+    def get_state_hash(self) -> str:
+        state_bytes = self.get_canonical_state_bytes() + self._rng.get_state()
         return hashlib.sha256(state_bytes).hexdigest()
 
     def _next_event_id(self) -> str:
@@ -234,6 +251,22 @@ class WorldEngineImpl:
             **kwargs
         )
 
+    def _get_daily_reset_events(self, account_ids: list[str], actor_id: str | None) -> list[DomainEvent]:
+        events = []
+        for acc_id in account_ids:
+            if not acc_id:
+                continue
+            acc = self._accounts.get(acc_id)
+            if acc:
+                reset_event = acc._maybe_reset_daily_counters(self.sim_time_ns, dry_run=False)
+                if reset_event:
+                    reset_event.event_id = self._next_event_id()
+                    reset_event.branch_id = self._branch_id
+                    reset_event.seq_num = self._next_seq_num()
+                    reset_event.actor_id = actor_id
+                    events.append(reset_event)
+        return events
+
     def _apply_event(self, event: DomainEvent) -> None:
         start = time.perf_counter()
         try:
@@ -252,11 +285,20 @@ class WorldEngineImpl:
         elif isinstance(event, PaymentRequested):
             self._payments[event.tx_id] = Payment(event)
             # if auto capture, apply it here so we have the aggregate created
+        elif isinstance(event, SettlementBatchCreated):
+            self._settlement_batches[event.batch_id] = SettlementBatch(event)
+        elif isinstance(event, GatewayStatusChanged):
+            if event.gateway_id not in self._gateways:
+                self._gateways[event.gateway_id] = GatewayEntity(event.gateway_id)
+            self._gateways[event.gateway_id].apply_event(event)
+        elif isinstance(event, DailyCountersReset):
+            if event.account_id in self._accounts:
+                self._accounts[event.account_id].apply_event(event)
 
         account_id = getattr(event, "account_id", None)
         if account_id and account_id in self._accounts:
             self._accounts[account_id].apply_event(event)
-            
+
         tx_id = getattr(event, "tx_id", None)
         if tx_id and tx_id in self._payments:
             self._payments[tx_id].apply_event(event)
@@ -266,7 +308,7 @@ class WorldEngineImpl:
             src_id = getattr(event, "source_account_id", None)
             if src_id and src_id in self._accounts:
                 self._accounts[src_id].apply_event(event)
-                
+
             tgt_id = getattr(event, "target_account_id", None)
             if tgt_id and tgt_id in self._accounts:
                 self._accounts[tgt_id].apply_event(event)
@@ -300,10 +342,11 @@ class WorldEngineImpl:
 
         No-op if no ChronoDAG was wired in (e.g. isolated unit tests).
         """
-        if self._chrono is None:
+        if self._chrono is None or not events:
             return
-        for event in events:
-            self._chrono.save_event(StoredEvent(
+
+        stored_events = [
+            StoredEvent(
                 event_id=event.event_id,
                 event_type=event.event_type,
                 sim_time_ns=event.sim_time_ns,
@@ -313,7 +356,14 @@ class WorldEngineImpl:
                 payload=self._event_payload(event),
                 causation_id=event.causation_id,
                 correlation_id=event.correlation_id,
-            ))
+            )
+            for event in events
+        ]
+        if hasattr(self._chrono, "save_events"):
+            self._chrono.save_events(stored_events)
+        else:
+            for se in stored_events:
+                self._chrono.save_event(se)
 
     def _mask_owner_id(self, owner_id: str) -> str:
         return hashlib.sha256(owner_id.encode()).hexdigest()[:8]
@@ -368,6 +418,7 @@ class WorldEngineImpl:
 
     def _execute_payment(self, command: Command) -> list[DomainEvent]:
         events: list[DomainEvent] = []
+
         tx_id = self._next_tx_id()
         events.append(self._create_event(
             PaymentRequested, actor_id=command.actor_id, tx_id=tx_id,

@@ -131,7 +131,7 @@ def validate_csvs(data_dir: Path) -> dict[str, dict[str, Any]]:
         if not filepath.exists():
             raise FileNotFoundError(f"Missing expected CSV: {filepath}")
 
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, encoding="utf-8") as f:
             reader = csv.reader(f)
             headers = next(reader, None)
             if headers != expected_headers:

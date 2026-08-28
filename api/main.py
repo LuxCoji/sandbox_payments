@@ -123,7 +123,7 @@ async def fork_branch(req: ForkRequest):
     try:
         return _session().fork(req.parent_branch_id, req.name, req.checkpoint_id)
     except KeyError:
-        raise HTTPException(404, f"Unknown branch or checkpoint")
+        raise HTTPException(404, "Unknown branch or checkpoint")
 
 
 class ChaosRequest(BaseModel):
@@ -182,7 +182,7 @@ async def stream(ws: WebSocket):
                         "correlation_id": event.correlation_id,
                     },
                 })
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 await ws.send_json({"type": "tick", "state": s.branch_summary("main")})
     except WebSocketDisconnect:
         pass

@@ -4,21 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from sim.core.interfaces import (
-    AccountSnapshot,
-    AccountStatus,
-    AccountType,
-    ActorRole,
-    DeviceSnapshot,
-    DeviceStatus,
-    DeviceType,
-    FeeSchedule,
-    GlobalParams,
-    MerchantDirectoryEntry,
-    RailLimits,
     TransactionType,
-    WorldView,
 )
-from sim.population.behaviour import PopulationBehaviourModel
 from sim.population.calibration import calibrate_from_csv
 from sim.population.profiles import ProfileSampler
 from sim.population.temporal import TemporalModel

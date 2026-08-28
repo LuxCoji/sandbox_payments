@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import os
 
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
+
 from sim.chrono.tests._fake_dag import InMemoryChronoDAG
 from sim.config import SimConfig
 from sim.main import build_simulation
@@ -31,10 +34,10 @@ NUM_USERS = 200
 DURATION_HOURS = 6
 
 
-def run_sim_for_hash(seed: int, monkeypatch) -> str:
+def run_sim_for_hash(seed: int, monkeypatch, num_users: int = NUM_USERS, num_merchants: int | None = None) -> str:
     monkeypatch.setattr("sim.main.PostgresChronoDAG", lambda db_url=None: InMemoryChronoDAG())
 
-    config = SimConfig(seed=seed, num_users=NUM_USERS, sim_duration_days=1, db_url="postgresql://mock:5432")
+    config = SimConfig(seed=seed, num_users=num_users, sim_duration_days=1, db_url="postgresql://mock:5432")
     engine, gateway, dag = build_simulation(config)
 
     data_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "paysim")
@@ -47,15 +50,13 @@ def run_sim_for_hash(seed: int, monkeypatch) -> str:
     behaviour_model = PopulationBehaviourModel(params, engine._rng)
     population = PopulationManager(behaviour_model, engine._rng)
     population.create_population(
-        num_users=NUM_USERS, num_merchants=max(1, NUM_USERS // 10), engine=engine
+        num_users=num_users, num_merchants=num_merchants if num_merchants is not None else max(1, num_users // 10), engine=engine
     )
     population.start_agent_loops(engine)
 
-    engine._env.run(until=DURATION_HOURS * 3600 * 1e9)
+    engine._env.run(until=int(DURATION_HOURS * 3600 * 1e9))
     return engine.get_state_hash()
 
-
-from hypothesis import given, settings, HealthCheck, strategies as st
 
 @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(
@@ -65,9 +66,9 @@ from hypothesis import given, settings, HealthCheck, strategies as st
 )
 def test_determinism_multi_run(monkeypatch, seed: int, num_users: int, num_merchants: int) -> None:
     """Verify that multiple runs with the same seed produce the identical state hash."""
-    hash1 = run_sim_for_hash(seed, monkeypatch)
-    hash2 = run_sim_for_hash(seed, monkeypatch)
-    hash3 = run_sim_for_hash(seed + 1, monkeypatch)
+    hash1 = run_sim_for_hash(seed, monkeypatch, num_users, num_merchants)
+    hash2 = run_sim_for_hash(seed, monkeypatch, num_users, num_merchants)
+    hash3 = run_sim_for_hash(seed + 1, monkeypatch, num_users, num_merchants)
 
     assert hash1 == hash2, f"Hashes for the same seed ({seed}) should be identical"
     assert hash1 != hash3, "Hashes for different seeds should be different"

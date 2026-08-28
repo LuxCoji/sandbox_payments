@@ -39,4 +39,5 @@ jobs:
       - name: Run deterministic regression suite
         run: uv run python scripts/regression_test.py
         env:
-          DATABASE_URL: postgresql://finsim:finsim_regress@localhost:5432/finsim_regress
+          FINSIM_DB_URL: postgresql://finsim:finsim_regress@localhost:5432/finsim_regress
+          FINSIM_CHRONO_BACKEND: postgres
