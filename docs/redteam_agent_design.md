@@ -1,7 +1,9 @@
 # Red-Team Agents — Design Notes
 
-Status: proposal, not yet implemented. Scope: red-team only (blue-team deferred).
-Builds on `sim/gateway`, `sim/chrono`. Companion to `docs/chrono_dag.md` and
+Status: in progress. Scope: red-team only (blue-team deferred). Phase 0 of the
+build sequence (§6) is implemented — package skeleton, provider config,
+import-linter boundary. Everything else in §6 is still proposal. Builds on
+`sim/gateway`, `sim/chrono`. Companion to `docs/chrono_dag.md` and
 `docs/interfaces.md` — read those first for the mechanics this proposes to use.
 
 ## Where this sits today
@@ -156,23 +158,88 @@ consistent with the `origin` tagging convention in §3 — both live in
 
 ## 6. Build sequence
 
-Ordered so nothing is built on a helper that doesn't exist yet:
+Ordered so nothing is built on a helper that doesn't exist yet. Checkboxes
+track actual implementation status, not just planning status.
 
-| # | What | Files |
-|---|---|---|
-| 1 | Wire a `RED_AGENT` `ActorContext` + persistent actor identity, and confirm `get_world_view()` works for it | new harness code, no `sim/` changes expected |
-| 2 | `build_simulation_for_branch(branch_id)` helper — checkout + reconstruct `WorldEngineImpl` (aggregates + RNG); design how the pending scheduler queue is handled | `sim/main.py` |
-| 3 | Rate-limit tier for branch ops (`FORK_BRANCH`/`REPLAY_BRANCH`/`DIFF_BRANCHES` vs. normal tools) | `sim/gateway/interfaces.py`, `sim/gateway/gateway.py` |
-| 4 | Grant `FORK_BRANCH`, `REPLAY_BRANCH`, `DIFF_BRANCHES` to `RED_AGENT` in `ROLE_CAPABILITIES` | `sim/gateway/interfaces.py` |
-| 5 | `commit_strategy` tool — tags `Branch.metadata.origin` | `sim/gateway/registry.py` (+ handler in `sim/main.py`'s tool registration) |
-| 6 | `call_plan()` on `ToolGateway` for batched execution | `sim/gateway/interfaces.py`, `sim/gateway/gateway.py` |
-| 7 | Minimal red-agent loop: checkout → get_world_view → LLM → call_plan → repeat | new `scripts/red_team_run.py` |
-| 8 | `LangGraphAdapter.as_tool_node()` (or a simpler harness first, defer LangGraph until the loop above is proven) | `sim/gateway/adapters.py` |
+| # | Phase | What | Files | Status |
+|---|---|---|---|---|
+| 0 | Scaffolding | New `agents/redteam/` package, `redteam` optional-dependency extra (`litellm`, `langgraph`), import-linter contract fencing `sim` off from importing `agents`, `providers.yaml` + `RedTeamConfig` | `pyproject.toml`, `Makefile`, `agents/redteam/{__init__.py,config.py,providers.yaml}` | ✅ done |
+| 1 | LLM router | `litellm.Router` wrapper over the provider/account pool (§7 below); `plan_next_moves()` with block-and-retry backoff on pool exhaustion | `agents/redteam/llm_router.py` | not started |
+| 2 | Gateway contract | `ToolSpec.rate_limit_tier`, `RED_AGENT` capability grant for `FORK_BRANCH`/`REPLAY_BRANCH`/`DIFF_BRANCHES`, `ToolCall` dataclass + `call_plan()` on `ToolGateway`, `ChronoDAG.update_branch_metadata()` (new — no mutator exists today), `commit_strategy` tool | `sim/gateway/interfaces.py`, `sim/gateway/gateway.py`, `sim/gateway/policy.py`, `sim/chrono/interfaces.py`, `sim/chrono/store.py`, `sim/main.py` | not started |
+| 3 | Branch reconstruction | `build_simulation_for_branch(branch_id)` — checkout + reconstruct `WorldEngineImpl`; new `DeterministicRNG.from_state()` and `WorldEngineImpl.restore_aggregate_snapshot()` (neither exists today); scheduler-queue gap scoped out of v1, documented (§ Known limitations) | `sim/main.py`, `sim/scheduler/rng.py`, `sim/core/engine.py` | not started |
+| 4 | Identity | `bootstrap_red_agent_context()` — first production code anywhere constructing a `RED_AGENT` `ActorContext`; persisted locally, not in `sim`/the DB | `agents/redteam/identity.py` | not started |
+| 5 | Harness loop | `run_session()`: fork or genesis-start → checkout → get_world_view → LLM plan → `call_plan()` → repeat until `commit_strategy` or session cap; CLI entrypoint | `agents/redteam/harness.py`, `scripts/red_team_run.py` | not started |
+| 6 | LangGraph | `LangGraphAdapter.as_tool_node()` + `build_graph()` wrapping the proven Phase 5 loop in a `StateGraph` (observe → plan → act → loop/END) | `sim/gateway/adapters.py`, `agents/redteam/harness.py` | not started |
+| 7 | Verification | Unit tests for `call_plan`/tier limits/branch round-trip/router retry; manual smoke test against one real provider; `testpaths`/`make typecheck` scope | `sim/gateway/tests/`, `agents/redteam/tests/`, `scripts/red_team_smoke_test.py` | not started |
 
-Steps 2 and the scheduler-queue sub-problem inside it are the real work here —
-everything downstream depends on being able to actually run on a forked branch.
-The capability grant (step 4) is genuinely a one-liner; don't let its simplicity
-imply the rest of the sequence is too.
+Phase 3 (branch reconstruction) is the real work — everything downstream
+depends on actually being able to run a live simulation on a forked branch.
+Phase 2's capability grant is genuinely a one-liner; the rest of that phase
+(new `ChronoDAG` mutator, tier-based rate limiting) isn't. LangGraph (Phase 6)
+is sequenced *after* the bare loop is proven, per user confirmation that
+LangGraph is wanted for v1 — not deferred indefinitely, just not built before
+its foundation (`call_plan`, branch reconstruction, identity) is validated.
+
+---
+
+## 7. LLM provider backend
+
+**Confirmed requirement**: LangGraph for orchestration, backed by free tiers
+across **Groq, NVIDIA Build, Gemini, and OpenRouter**, routed through
+**LiteLLM's `Router`** rather than hand-rolled per-provider clients — LiteLLM
+confirmed to support Gemini as a first-class provider, and its `Router`
+supports multiple deployments per `model_name` with different `api_key`s and
+several routing/failover strategies (simple-shuffle, rate-limit-aware-v2,
+least-busy, latency-based).
+
+**Shape confirmed with the user**: a single red-team persona whose LLM calls
+round-robin/failover across the *whole* provider+account pool purely for
+quota survival — not one persona per provider. On full-pool exhaustion, the
+harness blocks and retries with backoff rather than skipping the session or
+failing the run.
+
+**Rate limits, verified against each provider's own docs (not guessed)**:
+
+| Provider | Scope | Free-tier limit | Source |
+|---|---|---|---|
+| Groq | **org-level, not per-key** — a second key on the same org adds no quota | 30 RPM, ~14,400 RPD (model-dependent) | console.groq.com/docs/rate-limits |
+| OpenRouter | **account-level, not per-key** — explicitly stated in their own docs | 20 RPM; 50 RPD unfunded, 1,000 RPD after a one-time $10 purchase | openrouter.ai/docs/api-reference/limits |
+| Gemini | **per-project**, not a stable published constant | must be read live per project | aistudio.google.com/rate-limit |
+| NVIDIA Build | unofficial, no published number | ~40 RPM, developer-forum consensus only | forums.developer.nvidia.com |
+
+**Consequence for the multi-account idea**: multiple *API keys on one
+account* do not multiply quota for Groq or OpenRouter — their docs say so
+directly. Multiple *separate accounts* (separate orgs/projects/emails) do,
+because the pooling in `providers.yaml` is per-`api_key_env` deployment
+entry, each resolvable to a different account's key. This is what's actually
+implemented (`agents/redteam/providers.yaml`), with a standing caution
+comment in that file: using multiple accounts to multiply a single free
+tier's quota is a ToS gray area for at least Groq and OpenRouter — the user's
+own sandbox project, their call, flagged rather than silently done.
+
+**Placement**: `litellm.Router` runs in-process inside the harness
+(`agents/redteam/llm_router.py`), not as a standalone proxy service —
+consistent with the project's existing "no local docker-compose stack"
+constraint (see `CLAUDE.md`).
+
+---
+
+## Known limitations
+
+- **Forked red-team branches resume with an empty scheduler queue.**
+  `SimulationEnv._queue` (in-flight scheduled-but-unfired events) is not part
+  of `Checkpoint`/`ReplayContext` and `build_simulation_for_branch()` (§6
+  Phase 3) does not reconstruct it. Properly fixing this means either
+  serializing the queue into the checkpoint format or deterministically
+  replaying `PopulationManager`'s recurring schedule forward (risking the
+  superlinear event-growth bug on longer runs) — both are separate design
+  passes, out of scope for v1. Practical effect: a red-team branch has no
+  organic background traffic "in motion" around the agent's actions unless
+  the harness explicitly calls `PopulationManager.start_agent_loops(engine)`
+  again after rebuilding (an approximation, not a restoration). A committed
+  strategy that "clears undetected" on such a branch is weaker evidence than
+  one tested against branches with organic noise present — interpret results
+  accordingly until this is solved.
 
 ---
 
@@ -180,11 +247,13 @@ imply the rest of the sequence is too.
 
 - **Session length** — how much sim-time does one planning session span before
   re-planning? Affects both §1's cost model and how stale the agent's view of
-  background traffic gets.
+  background traffic gets. `RedTeamConfig.session_max_plan_calls` (default 8)
+  is a first guess, to be tuned from real smoke-test behavior, not validated.
 - **Scoring the committed branch** — diffed only against `main`, or also against
   sibling red-team branches from other personas/models, to compare which
   adversary found the sharpest edge?
-- **Multi-provider personas** — running different models as distinct personas is
-  just distinct `ActorContext`s against the same gateway, no architectural
-  blocker — but does persona identity live in the branch name or in
-  `Branch.metadata`? (Given §4's decision, metadata is the consistent answer.)
+- **Multi-provider personas** — resolved for v1: one persona pooling across
+  all providers (§7), not distinct personas per provider. Running distinct
+  personas remains future work — would be distinct `ActorContext`s against
+  the same gateway, no architectural blocker, with persona identity living in
+  `Branch.metadata` per §4's decision.
