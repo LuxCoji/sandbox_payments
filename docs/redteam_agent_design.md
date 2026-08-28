@@ -1,10 +1,14 @@
 # Red-Team Agents — Design Notes
 
-Status: in progress. Scope: red-team only (blue-team deferred). Phase 0 of the
-build sequence (§6) is implemented — package skeleton, provider config,
-import-linter boundary. Everything else in §6 is still proposal. Builds on
+Status: **v1 complete** — all 8 phases of the build sequence (§6) implemented
+and verified, including a real end-to-end session against real providers
+(Groq/Gemini/NVIDIA) and a real Postgres/Supabase database. Builds on
 `sim/gateway`, `sim/chrono`. Companion to `docs/chrono_dag.md` and
-`docs/interfaces.md` — read those first for the mechanics this proposes to use.
+`docs/interfaces.md` — read those first for the mechanics this uses.
+
+**§1–§4 decisions are locked** (interaction model = lockstep, onset = fork
+after warmup, forking = the agent's own instrument, session identity = branch
+metadata). See each section for what "locked" means concretely.
 
 ## Where this sits today
 
@@ -23,7 +27,7 @@ Each gets its own recommendation below, then they recombine into one v1 shape.
 
 ---
 
-## 1. Simulation time vs. API-call time
+## 1. Simulation time vs. API-call time — LOCKED: lockstep (Option A)
 
 `SimulationEnv` (`sim/scheduler/env.py`) is a plain `heapq` priority queue keyed
 on `(time_ns, priority, sequence)` with zero coupling to the wall clock — it only
@@ -32,37 +36,47 @@ sim-time and real-time to relate at all.
 
 | Option | Trade-off |
 |---|---|
-| A. Lockstep — one decision, one action | Sim pauses at the agent's turn, blocks on the LLM call, executes exactly the one tool call returned, resumes. Trivial to reason about, but every fraudulent action costs a full API round-trip. |
-| B. Decoupled / live | Background traffic keeps advancing on its own clock while the agent "thinks" in wall time. `SimulationEnv.schedule()` already rejects scheduling into the past, so a slow response can't retroactively land where intended — needs a held-time window per actor, real added complexity for a single-threaded scheduler with no concurrency model today. |
-| **C. Batched planning sessions (recommended)** | The agent isn't invoked per micro-action. Periodically, it's given the current world view and returns an ordered plan of tool calls with intended offsets, executed rapid-fire with no further LLM calls until the next planning point. |
+| **A. Lockstep — one decision, one action (locked)** | Sim pauses at the agent's turn, blocks on the LLM call, executes exactly the one tool call returned, resumes. |
+| B. Decoupled / live | Background traffic keeps advancing on its own clock while the agent "thinks" in wall time. `SimulationEnv.schedule()` already rejects scheduling into the past, so a slow response can't retroactively land where intended — needs a held-time window per actor, real added complexity for a single-threaded scheduler with no concurrency model today. Rejected: unneeded complexity for what the pool ceiling already forces regardless. |
+| C. Batched planning sessions | The agent isn't invoked per micro-action — periodically given the world view, returns an ordered plan of tool calls, executed rapid-fire with no further LLM calls until the next planning point. **Rejected** — see below. |
 
-**Gateway contract needed for C:** `ToolGateway.call_tool()` today takes one call
-at a time. Batched planning needs a real entry point, not a harness-side loop
-over `call_tool()`:
+**Why lockstep over batching, reversing the earlier recommendation:** batching's
+appeal was "fewer API calls," but the free-tier pool (§7) is the actual
+bottleneck regardless of interaction model — Groq 30 RPM, OpenRouter 20 RPM,
+Gemini ~15 RPM, NVIDIA ~40 RPM cap the agent to roughly one action every few
+seconds either way, so batching doesn't save real throughput. What it does cost
+is reactivity: a pre-committed batch executes blind to whatever happened after
+its first action — if move 1 gets flagged, the rest of the batch fires anyway,
+unable to adapt. For an agent whose entire job is to probe and react to
+detection, that's a correctness problem, not a minor trade-off. Lockstep's only
+real downside (one LLM round-trip per action) is latency already baked into the
+rate-limit ceiling, not an added cost.
 
-```python
-def call_plan(
-    self,
-    plan: list[ToolCall],  # {tool_name, parameters, intended_sim_time_offset_ns}
-    context: ActorContext,
-) -> list[ToolResult]:
-    """Execute multiple tools in one logical turn, one rate-limit window."""
-```
+**Consequence for the build:** no new `call_plan()` gateway method needed. The
+existing `ToolGateway.call_tool()` — one call, one rate-limit window, one
+capability check — is exactly the lockstep contract. This drops one whole piece
+from Phase 2 of the build sequence (§6).
 
-Without this, batching logic leaks into the harness instead of living in the
-gateway where capability checks and rate limits already are.
-
-**Open question:** how much simulated time does one planning session span before
-the agent re-plans? Too short reintroduces option A's cost problem; too long
-lets background traffic drift far past what the last plan accounted for. Related:
-nothing today pauses `PopulationManager.start_agent_loops()`'s recurring
-schedule while the red agent "thinks" — background population events keep
-advancing regardless. Batching doesn't freeze the world, it just changes how
-often the agent is consulted.
+**Resolved, not actually open:** earlier drafts of this doc worried that
+background population events would keep advancing in wall-clock-adjacent sim
+time while the agent "thinks" between actions, drifting the world out from
+under it. That doesn't apply to the actual architecture. Two facts settle
+it: (1) `sim_time_ns` only moves when `SimulationEnv.step()` pops an event —
+it has no coupling to the wall clock, so blocking on an LLM call doesn't
+advance or drift anything; (2) a forked red-team branch gets a brand-new,
+empty `SimulationEnv()` (`build_simulation_for_branch()`, §6 Phase 3/Known
+limitations) — no restored queue, no `PopulationManager` loop attached. The
+branch is static except for what the agent's own tool calls produce, so
+there's no background traffic to drift out of sync *with* in the first
+place. Blocking on the LLM call during "decide" costs nothing, because
+nothing else on that branch is happening concurrently. This would become a
+real question again only if forked branches were later given their own live
+background traffic (see `PopulationManager.start_agent_loops(engine)` as a
+mentioned-but-unbuilt mitigation in Known limitations) — not the case today.
 
 ---
 
-## 2. When does the red team start?
+## 2. When does the red team start? — LOCKED: fork after warm-up (Option B)
 
 | Option | Trade-off |
 |---|---|
@@ -84,7 +98,7 @@ cold start.
 
 ---
 
-## 3. Forking as the agent's own instrument
+## 3. Forking as the agent's own instrument — LOCKED (this is the user's own idea)
 
 The idea worth building: branching doesn't have to be only *our* tool for
 observing the agent after the fact — it can be *the agent's* tool, a scratch
@@ -126,7 +140,7 @@ dead end it abandoned."
 
 ---
 
-## 4. Who owns the "session" concept?
+## 4. Who owns the "session" concept? — LOCKED: branch metadata (Option 2)
 
 There's no `Session` entity in the codebase. `ActorContext.session_id`
 (`sim/gateway/interfaces.py:129`) exists but is unused today. Three places it
@@ -149,7 +163,7 @@ consistent with the `origin` tagging convention in §3 — both live in
 | Concern | Decision |
 |---|---|
 | Onset | Fork from a warm-up checkpoint (§2B, 2–4h default). Genesis-start stays available as an explicit flag. |
-| Cadence | Batched planning sessions (§1C) via a new `call_plan()` gateway method. |
+| Cadence | Lockstep (§1A) — one `call_tool()` per agent decision, no new gateway method needed. |
 | Exploration | Within a session, the agent may fork sub-branches to test moves before committing (§3), gated by new capability grants + mandatory `commit_strategy` call. |
 | Session identity | Lives in `Branch.metadata` (§4), not a new entity. |
 | Isolation | All of this happens off `main`. Nothing the agent does — including its own forks — ever mutates the branch other actors or analysts read from. |
@@ -164,13 +178,13 @@ track actual implementation status, not just planning status.
 | # | Phase | What | Files | Status |
 |---|---|---|---|---|
 | 0 | Scaffolding | New `agents/redteam/` package, `redteam` optional-dependency extra (`litellm`, `langgraph`), import-linter contract fencing `sim` off from importing `agents`, `providers.yaml` + `RedTeamConfig` | `pyproject.toml`, `Makefile`, `agents/redteam/{__init__.py,config.py,providers.yaml}` | ✅ done |
-| 1 | LLM router | `litellm.Router` wrapper over the provider/account pool (§7 below); `plan_next_moves()` with block-and-retry backoff on pool exhaustion | `agents/redteam/llm_router.py` | not started |
-| 2 | Gateway contract | `ToolSpec.rate_limit_tier`, `RED_AGENT` capability grant for `FORK_BRANCH`/`REPLAY_BRANCH`/`DIFF_BRANCHES`, `ToolCall` dataclass + `call_plan()` on `ToolGateway`, `ChronoDAG.update_branch_metadata()` (new — no mutator exists today), `commit_strategy` tool | `sim/gateway/interfaces.py`, `sim/gateway/gateway.py`, `sim/gateway/policy.py`, `sim/chrono/interfaces.py`, `sim/chrono/store.py`, `sim/main.py` | not started |
-| 3 | Branch reconstruction | `build_simulation_for_branch(branch_id)` — checkout + reconstruct `WorldEngineImpl`; new `DeterministicRNG.from_state()` and `WorldEngineImpl.restore_aggregate_snapshot()` (neither exists today); scheduler-queue gap scoped out of v1, documented (§ Known limitations) | `sim/main.py`, `sim/scheduler/rng.py`, `sim/core/engine.py` | not started |
-| 4 | Identity | `bootstrap_red_agent_context()` — first production code anywhere constructing a `RED_AGENT` `ActorContext`; persisted locally, not in `sim`/the DB | `agents/redteam/identity.py` | not started |
-| 5 | Harness loop | `run_session()`: fork or genesis-start → checkout → get_world_view → LLM plan → `call_plan()` → repeat until `commit_strategy` or session cap; CLI entrypoint | `agents/redteam/harness.py`, `scripts/red_team_run.py` | not started |
-| 6 | LangGraph | `LangGraphAdapter.as_tool_node()` + `build_graph()` wrapping the proven Phase 5 loop in a `StateGraph` (observe → plan → act → loop/END) | `sim/gateway/adapters.py`, `agents/redteam/harness.py` | not started |
-| 7 | Verification | Unit tests for `call_plan`/tier limits/branch round-trip/router retry; manual smoke test against one real provider; `testpaths`/`make typecheck` scope | `sim/gateway/tests/`, `agents/redteam/tests/`, `scripts/red_team_smoke_test.py` | not started |
+| 1 | LLM router | `litellm.Router` wrapper over the provider/account pool (§7 below); `decide_next_action()` — one lockstep decision per call, with block-and-retry backoff on pool exhaustion | `agents/redteam/llm_router.py` | ✅ done |
+| 2 | Gateway contract | `ToolSpec.rate_limit_tier`, `RED_AGENT` capability grant for `FORK_BRANCH`/`REPLAY_BRANCH`/`DIFF_BRANCHES`, `ChronoDAG.update_branch_metadata()` (new mutator, implemented on both `PostgresChronoDAG` and `InMemoryChronoDAG`), `commit_strategy` tool in a new `_register_redteam_tools()`. No new `call_plan()` method — lockstep uses the existing `call_tool()`. Tier-wide rate limiting (`RateLimiter.check_and_increment_tier`, `TIER_LIMITS`) enforced alongside per-tool limits. | `sim/gateway/interfaces.py`, `sim/gateway/gateway.py`, `sim/gateway/policy.py`, `sim/chrono/interfaces.py`, `sim/chrono/store.py`, `sim/chrono/tests/_fake_dag.py`, `sim/main.py` | ✅ done |
+| 3 | Branch reconstruction | `build_simulation_for_branch(config, branch_id)` — checkout + reconstruct `WorldEngineImpl`, restoring RNG via the already-existing `DeterministicRNG.set_state()` (no new RNG method needed — `set_state()` was already there, just unused) and aggregates via new `WorldEngineImpl.get_full_snapshot_bytes()`/`restore_full_snapshot_bytes()`. Raises `NotImplementedError` if the checkpoint has pending events past it (no StoredEvent→DomainEvent replay path exists — checkpoint-at-head is the only supported case). Scheduler-queue gap scoped out of v1, documented (§ Known limitations) | `sim/main.py`, `sim/core/engine.py` | ✅ done |
+| 4 | Identity | `bootstrap_red_agent_context()` — first production code anywhere constructing a `RED_AGENT` `ActorContext`; actor_id persisted locally (gitignored `agents/redteam/.persona_identity.json`), not in `sim`/the DB. Confirmed end-to-end: `get_world_view()` already correctly filters accounts to the actor's own for `RED_AGENT` (`sim/core/engine.py`'s owner-filter branch already included it) | `agents/redteam/identity.py` | ✅ done |
+| 5 | Harness loop | `run_session()`: fork or genesis-start → checkout → get_world_view → LLM decides one action → `call_tool()` → observe result → repeat until `commit_strategy` or step cap; CLI entrypoint. `router`/`identity_file` injectable for tests — 3 tests cover stop-on-commit, stop-at-cap, and the checkpoint-or-genesis guard, all with a mocked LLM response (no real network calls) | `agents/redteam/harness.py`, `agents/redteam/personas.py`, `scripts/red_team_run.py` | ✅ done |
+| 6 | LangGraph | `LangGraphAdapter.as_tool_node()` (generic — takes an `ActorContext`, reads `state["action"]` as a plain `{tool_name, parameters}` mapping so `sim/gateway` never imports `agents/`) + `build_graph()`/`run_session_via_graph()` wrapping the proven Phase 5 loop in a `StateGraph` (observe → decide → act → loop/END). Same 2 test scenarios as Phase 5, run through the graph instead of the bare loop, same results | `sim/gateway/adapters.py`, `agents/redteam/harness.py` | ✅ done |
+| 7 | Verification | Unit tests for tier limits/branch round-trip/router retry (spread across earlier phases as they landed — 88 tests total across `sim/gateway/tests/`, `sim/chrono/tests/`, `agents/redteam/tests/`, `tests/integration/`); manual smoke test — ran for real against Groq/Gemini/NVIDIA + a real Postgres/Supabase DB, full session succeeded (`create_account` → `inspect_account`, branch `red-team/smoketest` created); `testpaths`/`make typecheck` scope (done in Phase 0) | `sim/gateway/tests/`, `agents/redteam/tests/`, `scripts/red_team_smoke_test.py` | ✅ done |
 
 Phase 3 (branch reconstruction) is the real work — everything downstream
 depends on actually being able to run a live simulation on a forked branch.
@@ -178,7 +192,7 @@ Phase 2's capability grant is genuinely a one-liner; the rest of that phase
 (new `ChronoDAG` mutator, tier-based rate limiting) isn't. LangGraph (Phase 6)
 is sequenced *after* the bare loop is proven, per user confirmation that
 LangGraph is wanted for v1 — not deferred indefinitely, just not built before
-its foundation (`call_plan`, branch reconstruction, identity) is validated.
+its foundation (branch reconstruction, identity, the lockstep loop) is validated.
 
 ---
 
@@ -222,6 +236,77 @@ own sandbox project, their call, flagged rather than silently done.
 consistent with the project's existing "no local docker-compose stack"
 constraint (see `CLAUDE.md`).
 
+**Model IDs need periodic re-verification.** All four providers' free-tier
+catalogs churn — every model ID originally guessed for `providers.yaml` had
+already been deprecated/retired by the time real keys were tested against
+them (Groq's `llama-3.3-70b-versatile` no longer exists; Gemini's
+`gemini-1.5-flash` 404s with a message naming its replacement; NVIDIA's
+`meta/llama-3.1-70b-instruct` had reached end-of-life; NVIDIA also has a
+gap between what `GET /v1/models` *lists* and what a given API key is
+actually *entitled* to call — a model can 404 as "not found for account"
+despite appearing in the catalog). `providers.yaml`'s header comment has the
+exact `curl` command per provider to re-check when a deployment starts
+404ing.
+
+---
+
+## 8. Observability — where the agent's "thinking" is visible
+
+**Primary mechanism (per explicit instruction): a React panel in the
+existing FinSim frontend, not Grafana.** No prompt/reasoning content is
+printed to the terminal either way — that constraint held regardless of
+backend. The frontend live-streams each step's `tool_name`, `reasoning`,
+success/failure, and which pool deployment served the call (routing), with
+latency, over a WebSocket — verified against a real session (real Postgres,
+real Groq/NVIDIA calls) end to end via `curl` before wiring the UI.
+
+**Backend — new session runner + pub/sub, separate composition root from the
+demo sim:**
+- `agents/redteam/llm_router.py`: `NextAction` gained `provider_model` (which
+  deployment actually served the call, e.g. `nvidia_nim/meta/llama-3.2-11b-vision-instruct`)
+  and `latency_ms`, captured in `decide_next_action()` from the litellm
+  response and a wall-clock timer around the call.
+- `agents/redteam/harness.py`: `run_session()`/`run_session_via_graph()` both
+  gained an `on_step` callback, invoked synchronously after each step with
+  the same dict appended to `SessionResult.step_log` — the hook the API
+  broadcasts through. Optional, so the harness has no observability
+  dependency by default (nothing changes for `scripts/red_team_run.py`).
+- `api/redteam_session.py` (new): `RedTeamObserver` — in-process session
+  registry + pub/sub, mirroring `api/live_dag.py::LiveChronoDAG`'s
+  subscriber pattern. Runs sessions in a thread-pool executor (litellm calls
+  are blocking) and reports back to the event loop via
+  `loop.call_soon_threadsafe`, the same pattern `SimSession` uses for its
+  own blocking DAG operations. **Deliberately separate from `SimSession`**:
+  the demo sim runs on an in-memory `LiveChronoDAG`, while red-team sessions
+  always talk to the real Postgres/Supabase `FINSIM_DB_URL` (same backend
+  `agents/redteam/harness.py` always used) — unifying those two ChronoDAG
+  backends is out of scope here.
+- `api/main.py`: `POST /api/redteam/sessions` (start; `from_genesis` or
+  `checkpoint_id`, `seed`, `use_graph`), `GET /api/redteam/sessions` (list),
+  `GET /api/redteam/sessions/{id}` (detail + full step log), `WS
+  /api/redteam/stream/{id}` (live steps; replays already-happened steps to a
+  subscriber that connects mid-session, since there's no periodic "tick" to
+  eventually catch up on the way `/api/stream` has).
+
+**Frontend**: new `frontend/src/RedTeamPanel.tsx`, wired in as a "Red Team"
+tab alongside the existing Feed/Agents/Checkpoints/Sandbox tabs in
+`App.tsx`. Deliberately extends the app's existing visual system (near-black
+palette, JetBrains Mono/Inter, the same `.feed-item`/`.badge`/`.pill`
+component classes `LiveFeed.tsx` and `SandboxPanel.tsx` already use) rather
+than introducing a second visual language for one panel.
+
+**litellm/OTel tracing (`_maybe_register_otel_callback()` in
+`llm_router.py`) is kept, demoted to secondary/optional**, still gated on
+`RedTeamConfig.enable_otel_tracing` (default `True`) — useful if you also
+want this in Grafana Cloud's OTLP pipeline (e.g. cross-referencing against
+the main sim's traces, longer retention than the in-memory session
+registry), but the frontend is what to reach for by default. Not gated on
+`OTEL_EXPORTER_OTLP_ENDPOINT`'s mere presence — a real gotcha found while
+building this: importing `litellm` loads `.env` as a side effect
+(undocumented litellm behavior), which sets that env var in *every* process
+the moment `litellm` is imported, regardless of test intent. All three
+router/harness test fixture files explicitly pass `enable_otel_tracing=False`.
+
 ---
 
 ## Known limitations
@@ -241,14 +326,83 @@ constraint (see `CLAUDE.md`).
   one tested against branches with organic noise present — interpret results
   accordingly until this is solved.
 
+- **Two incompatible checkpoint serializations exist for `aggregate_snapshot`.**
+  `WorldEngineImpl.get_canonical_state_bytes()` (used by `api/sim_session.py`
+  for its own live in-process forking) is a lossy, hash-only encoding —
+  `Account.to_canonical_dict()` and its siblings deliberately drop
+  `account_id`, `owner_id`, `created_at_ns`, `linked_device_ids`, etc.,
+  fields not needed for the state-hash contract but required to reconstruct
+  a usable `Account` object. `build_simulation_for_branch()` (§6 Phase 3)
+  needs the *other* one — the new `get_full_snapshot_bytes()`/
+  `restore_full_snapshot_bytes()` pair, which pickles the aggregates
+  wholesale. **Checkpoints created via the API's live-session forking path
+  are not restorable through `build_simulation_for_branch()`** — a red-team
+  session's warmup checkpoint must be created with `get_full_snapshot_bytes()`
+  explicitly (see the round-trip test in
+  `tests/integration/test_build_simulation_for_branch.py` for the exact
+  shape). This wasn't originally called out in this doc's Phase 3 gap
+  description — it was assumed decoding whatever `aggregate_snapshot` already
+  contained would be enough; it isn't, because two different producers of
+  that field disagree on its format.
+
+- **`build_simulation_for_branch()` only supports checkpoint-at-head.**
+  If the target branch has any events committed after its latest checkpoint
+  (`ReplayContext.pending_events` non-empty), it raises `NotImplementedError`
+  rather than silently reconstructing incomplete state — nothing in the
+  codebase deserializes a `StoredEvent.payload` dict back into a live
+  `DomainEvent` instance to replay into a rebuilt engine. In practice this
+  means: always take a fresh checkpoint immediately before forking, and
+  don't execute further commands against a branch's engine without
+  re-checkpointing before the next `build_simulation_for_branch()` call
+  against it (e.g. from a separate process).
+
+- **`ToolSpec.parameter_schema` is registered as an empty `{}` for every
+  tool in `sim/main.py` today** — real JSON Schema was never populated
+  there, for any actor, not just red-team. The agent can't be told what
+  parameters a tool expects by reading the schema off `list_tools()`.
+  Worked around in `agents/redteam/personas.py` with a hardcoded
+  `_TOOL_PARAM_HINTS` table for the known core + red-team tools, injected
+  into the prompt alongside (not instead of) the real schema. This is a
+  stopgap, not a fix — the actual fix is populating `parameter_schema` on
+  every `ToolSpec` registration in `sim/main.py`, which is outside this
+  phase's scope but should happen before new tools are added.
+
+- **Grafana Cloud export isn't guaranteed to actually reach the collector.**
+  Verified real, non-code-level failures during testing: a `401
+  Unauthorized` (points at `OTEL_EXPORTER_OTLP_HEADERS` in `.env` being
+  stale/invalid — verify the Grafana Cloud token is current) and, separately,
+  an IPv6 "no route to host" (environment-specific network egress, likely
+  not reproducible outside that sandbox). Neither is a bug in §8's wiring —
+  `decide_next_action()` returns correct results regardless of whether the
+  span actually made it to Grafana, since export failures don't raise. If
+  spans aren't showing up, check credentials and network reachability
+  before assuming the instrumentation is broken.
+
+- **`--from-genesis` isn't repeatable against a persistent "main" branch —
+  by design, not a bug.** `event_id` derivation
+  (`WorldEngineImpl._next_event_id`) is `uuid5(branch_id, seq_num)`, with no
+  dependency on `seed` or event content. Re-running genesis population
+  creation against a real DB that already has "main" history always
+  collides on `UniqueViolation` at the same `seq_num`s, regardless of seed.
+  This isn't specific to the red-team harness — `sim/main.py::run_seed()`
+  has the identical property. Correct usage: run `--from-genesis` once per
+  environment to bootstrap, note the checkpoint id it logs, then use
+  `--checkpoint <id>` for every subsequent session — never re-run genesis
+  against a "main" that already has history. Found by actually running
+  `scripts/red_team_smoke_test.py` against a real Supabase DB that already
+  had 665 events on "main" from prior work; required a `chrono.reset()`
+  (destructive, done with explicit user confirmation) to get a clean smoke
+  run.
+
 ---
 
 ## Open questions not resolved here
 
-- **Session length** — how much sim-time does one planning session span before
-  re-planning? Affects both §1's cost model and how stale the agent's view of
-  background traffic gets. `RedTeamConfig.session_max_plan_calls` (default 8)
-  is a first guess, to be tuned from real smoke-test behavior, not validated.
+- **Session length** — how many lockstep steps (actions) does one session run
+  before ending, independent of an early `commit_strategy` call? Affects how
+  stale the agent's view of background traffic gets as the session runs on.
+  `RedTeamConfig.session_max_steps` (default 8) is a first guess, to be tuned
+  from real smoke-test behavior, not validated.
 - **Scoring the committed branch** — diffed only against `main`, or also against
   sibling red-team branches from other personas/models, to compare which
   adversary found the sharpest edge?
