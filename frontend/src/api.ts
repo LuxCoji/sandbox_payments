@@ -99,6 +99,13 @@ export const api = {
       body: JSON.stringify({ action, params }),
     }).then((r) => j<BranchState>(r)),
   diff: (a: string, b: string) => fetch(`${BASE}/diff?branch_a=${a}&branch_b=${b}`).then((r) => j<DiffResult>(r)),
+  deleteBranch: (id: string) => fetch(`${BASE}/branches/${id}`, { method: "DELETE" }).then((r) => j<void>(r)),
+  resetSimulation: (seed: number = 42, numUsers: number = 60, numMerchants: number = 8) =>
+    fetch(`${BASE}/reset`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seed, num_users: numUsers, num_merchants: numMerchants }),
+    }).then((r) => j<void>(r)),
 };
 
 export function wsUrl(): string {

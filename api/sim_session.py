@@ -289,6 +289,18 @@ class SimSession:
         self.branches[new_branch_id] = BranchHandle(new_branch_id, name, cloned_engine, live=False)
         return self.branch_summary(new_branch_id)
 
+    def delete_branch(self, branch_id: str) -> None:
+        if branch_id not in self.branches:
+            raise KeyError(branch_id)
+        
+        self.dag.delete_branch(branch_id)
+        self.branches.pop(branch_id)
+        
+        to_delete = [cp_id for cp_id in list(self._checkpoint_snapshots.keys())
+                     if cp_id.startswith(f"cp-{branch_id}-")]
+        for cp_id in to_delete:
+            self._checkpoint_snapshots.pop(cp_id, None)
+
     # ── chaos / sandbox actions (forked branches only) ─────────────
 
     def apply_chaos(self, branch_id: str, action: str, params: dict) -> dict:

@@ -119,6 +119,16 @@ export default function App() {
     });
   }
 
+  async function handleReset() {
+    if (!confirm("Are you sure you want to completely reset the simulation? All branches and checkpoints will be lost.")) return;
+    try {
+      await api.resetSimulation();
+      window.location.reload();
+    } catch (e: any) {
+      alert("Failed to reset: " + e.message);
+    }
+  }
+
   const shownEvents = events.filter((e) => e.branch_id === selectedBranch);
 
   return (
@@ -143,6 +153,7 @@ export default function App() {
           {connected ? "live" : "reconnecting"}
         </div>
         <button className="btn small" onClick={togglePause}>{paused ? "▶ resume" : "⏸ pause"}</button>
+        <button className="btn small danger" onClick={handleReset}>⟲ reset</button>
       </div>
 
       <div className="main">

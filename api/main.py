@@ -159,6 +159,33 @@ async def pause(req: PauseRequest):
     return {"paused": req.paused}
 
 
+class ResetRequest(BaseModel):
+    seed: int = 42
+    num_users: int = 60
+    num_merchants: int = 8
+
+
+@app.post("/api/reset")
+async def reset_simulation(req: ResetRequest):
+    global session
+    if session:
+        await session.stop()
+    session = SimSession(seed=req.seed, num_users=req.num_users, num_merchants=req.num_merchants)
+    session.start()
+    return {"status": "ok"}
+
+
+@app.delete("/api/branches/{branch_id}")
+async def delete_branch(branch_id: str):
+    try:
+        _session().delete_branch(branch_id)
+        return {"status": "ok"}
+    except KeyError:
+        raise HTTPException(404, "Unknown branch")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.websocket("/api/stream")
 async def stream(ws: WebSocket):
     await ws.accept()

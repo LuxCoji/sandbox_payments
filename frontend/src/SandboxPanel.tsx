@@ -67,8 +67,30 @@ export default function SandboxPanel({ branches, accounts, onForked, selectedBra
     }
   }
 
+  async function doDeleteBranch() {
+    if (!sandboxBranch) return;
+    if (!confirm(`Delete branch ${sandboxBranch}?`)) return;
+    setBusy(true);
+    try {
+      await api.deleteBranch(sandboxBranch);
+      onForked("main");
+    } catch (e: any) {
+      alert("Failed to delete branch: " + e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div>
+    <div className="panel sandbox-panel">
+      <div className="panel-header">
+        <h2>Sandbox</h2>
+        {forkedBranches.length > 0 && (
+          <button className="btn danger-outline" disabled={busy} onClick={doDeleteBranch}>
+            Delete Branch
+          </button>
+        )}
+      </div>
       <div className="callout">
         Fork main into a paused timeline, then inject chaos — freeze an account, shove in
         cash, force a transfer — and diff it against a live branch to see exactly what changed.

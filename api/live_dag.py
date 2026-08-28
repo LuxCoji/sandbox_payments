@@ -150,6 +150,18 @@ class LiveChronoDAG:
         )
         return branch
 
+    def delete_branch(self, branch_id: str) -> None:
+        if branch_id == "main":
+            raise ValueError("Cannot delete 'main' branch")
+        for row in self._branches.values():
+            if row.branch.parent_branch_id == branch_id:
+                raise ValueError(f"Cannot delete branch {branch_id} because branch {row.branch.branch_id} depends on it")
+                
+        self._branches.pop(branch_id, None)
+        to_delete = [cp_id for cp_id, cp in self._checkpoints_by_id.items() if cp.branch_id == branch_id]
+        for cp_id in to_delete:
+            self._checkpoints_by_id.pop(cp_id, None)
+
     def _resolve_lineage(self, branch_id: str) -> list[tuple[str, int, int]]:
         """Walk parent chain to (branch_id, start_seq_exclusive, end_seq) segments,
         root-first, mirroring PostgresChronoDAG._resolve_lineage."""
