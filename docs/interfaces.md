@@ -268,6 +268,8 @@ class CalibratedParams:
 - `diff(branch_a: str, branch_b: str, at_event: int) -> StateDiff`
 - `replay(branch_id: str, from_event: int, to_event: int) -> list[StoredEvent]`
 - `get_state_hash(branch_id: str, event_number: int) -> str`
+- `delete_branch(branch_id: str) -> None`
+- `reset() -> None`
 
 ---
 

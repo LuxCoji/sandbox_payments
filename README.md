@@ -7,7 +7,7 @@ A deterministic, event-sourced financial simulation engine with branching time-t
 FinSim models a realistic retail payment ecosystem using discrete-event simulation, calibrated from real-world transaction data (PaySim). It supports:
 
 - **Deterministic replay** – identical seeds produce identical state hashes
-- **Branching (ChronoDAG)** – fork simulation state at any point, inject adversarial agents, and diff outcomes
+- **Branching (ChronoDAG)** – fork simulation state at any point, inject adversarial agents, and diff outcomes. Postgres integration in CI and the ChronoDAG protocol explicitly support resetting and deletion now.
 - **Tool Gateway** – capability-gated, rate-limited API for agent interaction
 - **Full observability** – OpenTelemetry traces, Prometheus metrics, structured logging
 
@@ -95,7 +95,7 @@ make regress      # deterministic regression suite against baselines/hashes.json
 
 ### 6. Run the Web UI & API
 
-FinSim includes a FastAPI backend and a React/Vite frontend for real-time simulation monitoring.
+FinSim includes a FastAPI backend and a React/Vite frontend for real-time simulation monitoring. The new V2 UI features include Reset Simulation and Delete Branch capabilities.
 
 ```bash
 # Terminal 1: Start the API server

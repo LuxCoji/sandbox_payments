@@ -32,7 +32,7 @@ uv run python -m sim.main replay-branch --branch main --to-event 5000
 uv run python -m sim.main diff-branches --branch-a main --branch-b red-team --event 5000
 ```
 
-To run the Web UI and API for real-time monitoring:
+To run the Web UI (V2 UI includes Reset Simulation and Delete Branch capabilities) and API for real-time monitoring:
 ```bash
 uv run uvicorn api.main:app --reload --port 8000 # API Server
 cd frontend && npm run dev                       # Vite Frontend
@@ -66,7 +66,7 @@ Everything derives from `DeterministicRNG` (`sim/scheduler/rng.py`, wraps `numpy
 
 ### ChronoDAG (branching)
 
-`sim/chrono/store.py::PostgresChronoDAG` implements branch-aware event sourcing: `save_event`, `create_checkpoint`, `fork` (branch from a checkpoint), `checkout` (restore + pending events), `diff` (compare two branches at a given event number — requires a checkpoint to exist on *both* branches at that exact `event_number`, it's not automatic), `replay`, `get_state_hash`. Branch lineage resolution (`_resolve_lineage`) walks parent branches via `parent_checkpoint_id`/`parent_branch_id` to compute per-branch event-number segments — a forked branch's own new events continue the seq_num counter from the fork point, they don't restart at 0.
+`sim/chrono/store.py::PostgresChronoDAG` implements branch-aware event sourcing: `save_event`, `create_checkpoint`, `fork` (branch from a checkpoint), `checkout` (restore + pending events), `diff` (compare two branches at a given event number — requires a checkpoint to exist on *both* branches at that exact `event_number`, it's not automatic), `replay`, `get_state_hash`, `delete_branch`, and `reset_store`. Postgres integration in CI and the ChronoDAG protocol explicitly support resetting and deletion now. Branch lineage resolution (`_resolve_lineage`) walks parent branches via `parent_checkpoint_id`/`parent_branch_id` to compute per-branch event-number segments — a forked branch's own new events continue the seq_num counter from the fork point, they don't restart at 0.
 
 `sim/chrono/tests/_fake_dag.py::InMemoryChronoDAG` is a faithful dict-backed reimplementation of the same algorithms, used by integration tests instead of mocking `psycopg` — prefer it over ad hoc mocks when a test needs real fork/diff/replay semantics.
 
