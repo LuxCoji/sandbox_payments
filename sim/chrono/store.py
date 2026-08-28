@@ -13,7 +13,7 @@ from sim.chrono.interfaces import (
     StateDiff,
     StoredEvent,
 )
-from sim.observability import FORKS_CREATED, traced
+from sim.observability import traced
 
 
 class PostgresChronoDAG(ChronoDAG):
@@ -258,11 +258,44 @@ class PostgresChronoDAG(ChronoDAG):
                     branch.created_at_ns,
                     branch.seed_offset,
                     branch.head_seq_num,
-                    json.dumps(branch.metadata)
+                    json.dumps(branch.metadata),
                 )
             )
-            FORKS_CREATED.inc()
-            return branch
+
+        return branch
+
+    @traced("ChronoDAG.delete_branch")
+    def delete_branch(self, branch_id: str) -> None:
+        if branch_id == "main":
+            raise ValueError("Cannot delete 'main' branch")
+        with self.conn.cursor() as cur:
+            # Check for children
+            cur.execute("SELECT branch_id FROM branches WHERE parent_branch_id = %s", (branch_id,))
+            child = cur.fetchone()
+            if child:
+                raise ValueError(f"Cannot delete branch {branch_id} because branch {child[0]} depends on it")
+            # Branches have cascading foreign keys for checkpoints and events if set up correctly,
+            # but let's delete explicitly to be safe
+            cur.execute("DELETE FROM events WHERE branch_id = %s", (branch_id,))
+            cur.execute("DELETE FROM checkpoints WHERE branch_id = %s", (branch_id,))
+            cur.execute("DELETE FROM branches WHERE branch_id = %s", (branch_id,))
+
+    @traced("ChronoDAG.reset")
+    def reset(self) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM events")
+            cur.execute("DELETE FROM checkpoints")
+            cur.execute("DELETE FROM branches")
+            # Recreate main
+            cur.execute(
+                '''
+                INSERT INTO branches (
+                    branch_id, parent_branch_id, parent_checkpoint_id,
+                    created_at_ns, seed_offset, head_seq_num, metadata
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ''',
+                ("main", None, None, 0, 0, 0, json.dumps({}))
+            )
 
     @traced("ChronoDAG.checkout")
     def checkout(self, branch_id: str) -> ReplayContext:

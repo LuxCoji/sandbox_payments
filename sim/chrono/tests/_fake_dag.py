@@ -106,6 +106,28 @@ class InMemoryChronoDAG:
         self._branches[branch_id] = branch
         return branch
 
+    def delete_branch(self, branch_id: str) -> None:
+        if branch_id == "main":
+            raise ValueError("Cannot delete 'main' branch")
+        for branch in self._branches.values():
+            if branch.parent_branch_id == branch_id:
+                raise ValueError(f"Cannot delete branch {branch_id} because branch {branch.branch_id} depends on it")
+
+        self._branches.pop(branch_id, None)
+        to_delete = [cp_id for cp_id, cp in self._checkpoints.items() if cp.branch_id == branch_id]
+        for cp_id in to_delete:
+            self._checkpoints.pop(cp_id, None)
+        self._events = [e for e in self._events if e.branch_id != branch_id]
+
+    def reset(self) -> None:
+        self._branches.clear()
+        self._checkpoints.clear()
+        self._events.clear()
+        self._branches["main"] = Branch(
+            branch_id="main", parent_checkpoint_id=None, parent_branch_id=None,
+            created_at_ns=0, seed_offset=0, head_seq_num=0, metadata={},
+        )
+
     # ── Lineage resolution (mirrors PostgresChronoDAG._resolve_lineage) ────
 
     def _resolve_lineage(self, branch_id: str) -> list[tuple[str, int, int]]:

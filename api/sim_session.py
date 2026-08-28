@@ -292,10 +292,10 @@ class SimSession:
     def delete_branch(self, branch_id: str) -> None:
         if branch_id not in self.branches:
             raise KeyError(branch_id)
-        
+
         self.dag.delete_branch(branch_id)
         self.branches.pop(branch_id)
-        
+
         to_delete = [cp_id for cp_id in list(self._checkpoint_snapshots.keys())
                      if cp_id.startswith(f"cp-{branch_id}-")]
         for cp_id in to_delete:

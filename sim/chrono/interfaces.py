@@ -146,10 +146,18 @@ class ChronoDAG(Protocol):
         """
         ...
 
-    def diff(
-        self, branch_a: str, branch_b: str, at_event: int
-    ) -> StateDiff:
-        """Compute recursive delta between two branches at a specific event."""
+    def diff(self, branch_a: str, branch_b: str, at_event: int) -> StateDiff:
+        """Diff two branches exactly at a given sequence number."""
+        ...
+
+    def delete_branch(self, branch_id: str) -> None:
+        """Deletes a branch and all its associated events and checkpoints.
+        Raises ValueError if attempting to delete 'main' or a branch that has children.
+        """
+        ...
+
+    def reset(self) -> None:
+        """Clears all data from the DAG, resetting it to its initial state."""
         ...
 
     def replay(

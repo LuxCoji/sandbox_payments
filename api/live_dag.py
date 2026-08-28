@@ -156,11 +156,22 @@ class LiveChronoDAG:
         for row in self._branches.values():
             if row.branch.parent_branch_id == branch_id:
                 raise ValueError(f"Cannot delete branch {branch_id} because branch {row.branch.branch_id} depends on it")
-                
+
         self._branches.pop(branch_id, None)
         to_delete = [cp_id for cp_id, cp in self._checkpoints_by_id.items() if cp.branch_id == branch_id]
         for cp_id in to_delete:
             self._checkpoints_by_id.pop(cp_id, None)
+
+    def reset(self) -> None:
+        self._branches.clear()
+        self._checkpoints_by_id.clear()
+        self._branches["main"] = _BranchRow(
+            branch=Branch(
+                branch_id="main", parent_checkpoint_id=None, parent_branch_id=None,
+                created_at_ns=0, seed_offset=0, head_seq_num=0, metadata={},
+            ),
+            checkpoints={}, name="main"
+        )
 
     def _resolve_lineage(self, branch_id: str) -> list[tuple[str, int, int]]:
         """Walk parent chain to (branch_id, start_seq_exclusive, end_seq) segments,
