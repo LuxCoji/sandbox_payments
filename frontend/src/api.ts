@@ -69,6 +69,31 @@ export interface DiffResult {
   modified: { entity_type: string; entity_id: string }[];
 }
 
+export interface RedTeamStep {
+  step: number;
+  tool_name: string;
+  parameters: Record<string, unknown>;
+  reasoning: string;
+  success: boolean;
+  error_code: string | null;
+  provider_model: string | null;
+  latency_ms: number | null;
+}
+
+export interface RedTeamSession {
+  session_id: string;
+  status: "running" | "done" | "error";
+  from_genesis: boolean;
+  checkpoint_id: string | null;
+  use_graph: boolean;
+  branch_id: string | null;
+  steps_taken: number;
+  committed: boolean;
+  error: string | null;
+  started_at: number;
+  step_log: RedTeamStep[];
+}
+
 const BASE = "/api";
 
 async function j<T>(res: Response): Promise<T> {
@@ -106,9 +131,27 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ seed, num_users: numUsers, num_merchants: numMerchants }),
     }).then((r) => j<void>(r)),
+  startRedteamSession: (opts: { fromGenesis: boolean; checkpointId?: string; seed?: number; useGraph?: boolean }) =>
+    fetch(`${BASE}/redteam/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from_genesis: opts.fromGenesis,
+        checkpoint_id: opts.checkpointId ?? null,
+        seed: opts.seed ?? 42,
+        use_graph: opts.useGraph ?? false,
+      }),
+    }).then((r) => j<{ session_id: string }>(r)),
+  redteamSessions: () => fetch(`${BASE}/redteam/sessions`).then((r) => j<RedTeamSession[]>(r)),
+  redteamSession: (id: string) => fetch(`${BASE}/redteam/sessions/${id}`).then((r) => j<RedTeamSession>(r)),
 };
 
 export function wsUrl(): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${location.host}/api/stream`;
+}
+
+export function redteamWsUrl(sessionId: string): string {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${location.host}/api/redteam/stream/${sessionId}`;
 }

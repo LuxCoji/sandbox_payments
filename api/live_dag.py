@@ -21,6 +21,7 @@ test-only `InMemoryChronoDAG` fake:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import time
 from dataclasses import dataclass, field
@@ -76,10 +77,8 @@ class LiveChronoDAG:
 
     def _broadcast(self, event: StoredEvent) -> None:
         for q in list(self._subscribers):
-            try:
+            with contextlib.suppress(asyncio.QueueFull):
                 q.put_nowait(event)
-            except asyncio.QueueFull:
-                pass
 
     # ── ChronoDAG protocol ─────────────────────────────────────────────
 
@@ -135,7 +134,8 @@ class LiveChronoDAG:
         self, checkpoint_id: str, branch_id: str, metadata: dict[str, object] | None = None
     ) -> Branch:
         cp = self._checkpoints_by_id[checkpoint_id]
-        parent_row = self._branches[cp.branch_id]
+        if cp.branch_id not in self._branches:
+            raise KeyError(cp.branch_id)
         branch = Branch(
             branch_id=branch_id,
             parent_checkpoint_id=checkpoint_id,

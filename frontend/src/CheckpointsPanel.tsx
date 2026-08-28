@@ -1,14 +1,16 @@
 import { useEffect, useState } from "react";
 import type { BranchNode, Checkpoint } from "./api";
 import { api } from "./api";
+import CopyChip from "./CopyChip";
 import { formatSimTime, shortId } from "./eventStyle";
 
 interface Props {
   branch: BranchNode | undefined;
   onForked: (branchId: string) => void;
+  onUseForRedTeam?: (checkpointId: string) => void;
 }
 
-export default function CheckpointsPanel({ branch, onForked }: Props) {
+export default function CheckpointsPanel({ branch, onForked, onUseForRedTeam }: Props) {
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
   const [busy, setBusy] = useState(false);
   const [nameById, setNameById] = useState<Record<string, string>>({});
@@ -98,6 +100,10 @@ export default function CheckpointsPanel({ branch, onForked }: Props) {
       {checkpoints.length === 0 && <div className="empty-hint">No checkpoints yet — main auto-checkpoints periodically.</div>}
       {[...checkpoints].reverse().map((cp) => (
         <div key={cp.checkpoint_id} className="inspector-card" style={{ padding: 10, marginBottom: 8 }}>
+          <div className="kv">
+            <span className="kv-key">checkpoint_id</span>
+            <CopyChip value={cp.checkpoint_id} display={shortId(cp.checkpoint_id, 13) + "…"} />
+          </div>
           <div className="kv"><span className="kv-key">event</span><span className="kv-val">#{cp.event_number}</span></div>
           <div className="kv"><span className="kv-key">sim time</span><span className="kv-val">{formatSimTime(cp.sim_time_ns)}</span></div>
           <div className="kv"><span className="kv-key">state hash</span><span className="kv-val">{shortId(cp.state_hash, 12)}…</span></div>
@@ -110,6 +116,15 @@ export default function CheckpointsPanel({ branch, onForked }: Props) {
             />
             <button className="btn small" disabled={busy} onClick={() => forkFrom(cp)}>Fork from here</button>
           </div>
+          {onUseForRedTeam && (
+            <button
+              className="btn small"
+              style={{ width: "100%", marginTop: 6, borderColor: "var(--violet)", color: "var(--violet)" }}
+              onClick={() => onUseForRedTeam(cp.checkpoint_id)}
+            >
+              🤖 Use for Red Team session →
+            </button>
+          )}
         </div>
       ))}
     </div>

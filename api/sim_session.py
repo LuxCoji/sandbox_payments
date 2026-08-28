@@ -18,6 +18,7 @@ This module is the API's composition root — it plays the same role
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import os
 import uuid
@@ -27,7 +28,7 @@ from dataclasses import dataclass
 from api.live_dag import LiveChronoDAG
 from sim.core.engine import WorldEngineImpl
 from sim.core.events import AccountCredited, AccountDebited, AccountFrozen, AccountStatusChanged
-from sim.core.interfaces import AccountStatus, ActorRole, Command, TransactionType
+from sim.core.interfaces import AccountStatus, Command, TransactionType
 from sim.population.agents import PopulationManager
 from sim.population.behaviour import PopulationBehaviourModel
 from sim.population.calibration import calibrate_from_csv
@@ -90,10 +91,8 @@ class SimSession:
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
 
     async def _run_loop(self) -> None:
         # asyncio silently drops exceptions from a task no one awaits — log
@@ -168,9 +167,9 @@ class SimSession:
 
     def accounts(self, branch_id: str) -> list[dict]:
         engine = self.branches[branch_id].engine
-        view = engine.get_world_view("api-inspector", ActorRole.BANK_OPS, limit=10_000)
         # BANK_OPS masks owner_id — for the demo inspector we want real ids,
-        # so re-derive snapshots straight from aggregates instead.
+        # so re-derive snapshots straight from aggregates instead of going
+        # through get_world_view().
         out = []
         for acc in engine._accounts.values():
             snap = acc.to_snapshot()

@@ -5,10 +5,11 @@ import LiveFeed from "./LiveFeed";
 import AccountsPanel from "./AccountsPanel";
 import SandboxPanel from "./SandboxPanel";
 import CheckpointsPanel from "./CheckpointsPanel";
+import RedTeamPanel from "./RedTeamPanel";
 import Sparkline from "./Sparkline";
 import { formatSimTime, shortId } from "./eventStyle";
 
-type Tab = "feed" | "agents" | "checkpoints" | "sandbox";
+type Tab = "feed" | "agents" | "checkpoints" | "sandbox" | "redteam";
 
 const MAX_FEED = 150;
 const MAX_SPARK = 40;
@@ -23,6 +24,7 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [paused, setPaused] = useState(false);
   const [tab, setTab] = useState<Tab>("feed");
+  const [redteamPrefillCheckpoint, setRedteamPrefillCheckpoint] = useState<string | null>(null);
   const [moneyHist, setMoneyHist] = useState<number[]>([]);
   const [txHist, setTxHist] = useState<number[]>([]);
   const [eventHist, setEventHist] = useState<number[]>([]);
@@ -178,6 +180,7 @@ export default function App() {
             <div className={`tab ${tab === "agents" ? "active" : ""}`} onClick={() => { setTab("agents"); setSelectedAccount(null); }}>Agents</div>
             <div className={`tab ${tab === "checkpoints" ? "active" : ""}`} onClick={() => setTab("checkpoints")}>Checkpoints</div>
             <div className={`tab ${tab === "sandbox" ? "active" : ""}`} onClick={() => setTab("sandbox")}>Sandbox</div>
+            <div className={`tab ${tab === "redteam" ? "active" : ""}`} onClick={() => setTab("redteam")}>Red Team</div>
           </div>
           <div className="tab-body">
             {tab === "feed" && <LiveFeed events={shownEvents} />}
@@ -196,6 +199,10 @@ export default function App() {
                   setSelectedBranch(id);
                   setTab("agents");
                 }}
+                onUseForRedTeam={(checkpointId) => {
+                  setRedteamPrefillCheckpoint(checkpointId);
+                  setTab("redteam");
+                }}
               />
             )}
             {tab === "sandbox" && (
@@ -209,6 +216,7 @@ export default function App() {
                 }}
               />
             )}
+            {tab === "redteam" && <RedTeamPanel initialCheckpointId={redteamPrefillCheckpoint} />}
           </div>
         </div>
       </div>
