@@ -14,6 +14,7 @@ import dataclasses
 import enum
 import hashlib
 import json
+import pickle
 import time
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -225,6 +226,55 @@ class WorldEngineImpl:
         state_bytes = self.get_canonical_state_bytes() + self._rng.get_state()
         return hashlib.sha256(state_bytes).hexdigest()
 
+    def get_full_snapshot_bytes(self) -> bytes:
+        """Full-fidelity serialization of aggregate state, restorable via
+        restore_full_snapshot_bytes() — distinct from get_canonical_state_bytes(),
+        which drops fields (account_id, owner_id, created_at_ns, ...) that
+        aren't needed for hashing but are required to reconstruct a live
+        Account/Device/Merchant/etc. Used by build_simulation_for_branch()
+        (sim/main.py) to rebuild a running engine from a ChronoDAG checkpoint
+        in a separate process — see docs/redteam_agent_design.md §3/§6 Phase 3.
+
+        Pickle rather than a hand-written per-aggregate-type dict: these are
+        plain in-memory Python objects with no external resources, and this
+        matches the existing checkpointing convention in
+        DeterministicRNG.get_state()/set_state() (sim/scheduler/rng.py).
+        """
+        state = {
+            "accounts": self._accounts,
+            "payments": self._payments,
+            "devices": self._devices,
+            "merchants": self._merchants,
+            "gateways": self._gateways,
+            "settlement_batches": self._settlement_batches,
+            "seq_num": self._seq_num,
+            "tx_counter": self._tx_counter,
+            "processed_idempotency_keys": self._processed_idempotency_keys,
+            "global_params": self._global_params,
+        }
+        return pickle.dumps(state)
+
+    def restore_full_snapshot_bytes(self, data: bytes) -> None:
+        """Restore aggregate state produced by get_full_snapshot_bytes().
+
+        Replaces this engine's in-memory aggregates wholesale — intended to
+        be called once, immediately after construction, before any commands
+        are executed. Does not touch the scheduler queue, RNG state, or
+        ChronoDAG wiring; callers restore those separately (see
+        build_simulation_for_branch() in sim/main.py).
+        """
+        state = pickle.loads(data)  # noqa: S301
+        self._accounts = state["accounts"]
+        self._payments = state["payments"]
+        self._devices = state["devices"]
+        self._merchants = state["merchants"]
+        self._gateways = state["gateways"]
+        self._settlement_batches = state["settlement_batches"]
+        self._seq_num = state["seq_num"]
+        self._tx_counter = state["tx_counter"]
+        self._processed_idempotency_keys = state["processed_idempotency_keys"]
+        self._global_params = state["global_params"]
+
     def _next_event_id(self) -> str:
         import uuid
         return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{self._branch_id}:{self._seq_num}"))
@@ -291,9 +341,8 @@ class WorldEngineImpl:
             if event.gateway_id not in self._gateways:
                 self._gateways[event.gateway_id] = GatewayEntity(event.gateway_id)
             self._gateways[event.gateway_id].apply_event(event)
-        elif isinstance(event, DailyCountersReset):
-            if event.account_id in self._accounts:
-                self._accounts[event.account_id].apply_event(event)
+        elif isinstance(event, DailyCountersReset) and event.account_id in self._accounts:
+            self._accounts[event.account_id].apply_event(event)
 
         account_id = getattr(event, "account_id", None)
         if account_id and account_id in self._accounts:

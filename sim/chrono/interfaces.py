@@ -156,6 +156,18 @@ class ChronoDAG(Protocol):
         """
         ...
 
+    def update_branch_metadata(self, branch_id: str, metadata: dict[str, object]) -> Branch:
+        """Replace a branch's metadata dict wholesale and return the updated Branch.
+
+        Used by red-team session bookkeeping (e.g. tagging an exploratory
+        fork's `origin` as "agent_experiment" vs "committed" — see
+        docs/redteam_agent_design.md §3) and by analyst-driven session
+        tagging alike. Callers that want to merge rather than overwrite
+        should read the current Branch first and pass `{**branch.metadata,
+        **updates}`.
+        """
+        ...
+
     def reset(self) -> None:
         """Clears all data from the DAG, resetting it to its initial state."""
         ...

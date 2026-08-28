@@ -47,7 +47,7 @@ redteam = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["sim", "tests", "agents"]
+testpaths = ["sim", "tests", "agents", "api"]
 asyncio_mode = "auto"
 # Default is ["test_*.py", "*_test.py"] which silently never collects the
 # contract_test_*.py files under sim/*/tests/ (make test-contract's `-k
@@ -72,6 +72,25 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
+
+# litellm ships without a py.typed marker / complete __all__ exports, so
+# strict mode's attr-defined checks fire on normal top-level usage
+# (litellm.Router, litellm.RateLimitError, ...). Treat it as untyped rather
+# than fighting its export surface.
+[[tool.mypy.overrides]]
+module = "litellm.*"
+ignore_missing_imports = true
+follow_imports = "skip"
+
+# langgraph's StateGraph.add_node/add_conditional_edges overloads are typed
+# against a single homogeneous NodeInputT — a graph of small, differently-
+# shaped node functions (each returning only the state keys it updates,
+# the standard LangGraph partial-update convention) doesn't cleanly match
+# that generic surface. Same treatment as litellm above, same reasoning.
+[[tool.mypy.overrides]]
+module = "langgraph.*"
+ignore_missing_imports = true
+follow_imports = "skip"
 
 [tool.importlinter]
 root_package = "sim"

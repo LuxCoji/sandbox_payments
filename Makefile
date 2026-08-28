@@ -29,7 +29,10 @@ install:
 	uv sync --extra dev
 
 install-redteam:
-	uv sync --extra redteam
+	# --extra alone reconciles the env to *only* what's requested, dropping
+	# dev tooling (pytest/ruff/mypy/...) if it isn't also listed — same class
+	# of footgun as the `--dev` gotcha in CLAUDE.md. Always request both.
+	uv sync --extra dev --extra redteam
 
 # Web UI: FastAPI backend (in-process live simulation + ChronoDAG) on :8000,
 # and the Vite/React frontend on :5173 (proxies /api -> :8000). Run each in

@@ -1,9 +1,25 @@
 """Gateway tests."""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
+from sim.gateway.gateway import ToolGatewayImpl
 from sim.gateway.interfaces import ActorContext, ActorRole, Capability, ToolSpec
 from sim.gateway.policy import RateLimiter, check_capabilities
 from sim.gateway.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from sim.core.interfaces import WorldEngine
+
+
+class _FakeEngine:
+    """Minimal stand-in for WorldEngine — call_tool only reads sim_time_ns.
+    Cast to WorldEngine at the call site rather than implementing the full
+    five-method Protocol, which these tests never exercise.
+    """
+
+    def __init__(self) -> None:
+        self.sim_time_ns = 0.0
 
 
 def test_tool_registry() -> None:
@@ -45,3 +61,38 @@ def test_rate_limiter() -> None:
     # Second call in same step blocked
     err = limiter.check_and_increment("user1", "tool1", 0, limit_per_step=1, limit_per_day=None)
     assert err is not None
+
+
+def test_tier_rate_limit_independent_of_per_tool_limit() -> None:
+    limiter = RateLimiter()
+
+    # "branch_op" tier caps at 2/step regardless of per-tool limits — two
+    # different tool names sharing the tier both draw from the same budget.
+    assert limiter.check_and_increment_tier("agent1", "branch_op", 0) is None
+    assert limiter.check_and_increment_tier("agent1", "branch_op", 0) is None
+    err = limiter.check_and_increment_tier("agent1", "branch_op", 0)
+    assert err is not None
+    assert "per step" in err
+
+    # "normal" tier has no cap (TIER_LIMITS["normal"] = (None, None))
+    for _ in range(50):
+        assert limiter.check_and_increment_tier("agent1", "normal", 0) is None
+
+
+def test_call_tool_enforces_tier_limit_across_different_tools() -> None:
+    registry = ToolRegistry()
+    for name in ("fork_branch", "diff_branches"):
+        registry.register_tool(
+            ToolSpec(name, "test", frozenset(), {}, rate_limit_tier="branch_op"),
+            lambda context, params, engine: [],
+        )
+
+    gateway = ToolGatewayImpl(registry=registry, rate_limiter=RateLimiter(), engine=cast("WorldEngine", _FakeEngine()))
+    ctx = ActorContext(actor_id="agent1", actor_role=ActorRole.RED_AGENT, capabilities=frozenset(), branch_id="main")
+
+    assert gateway.call_tool("fork_branch", {}, ctx).success is True
+    assert gateway.call_tool("diff_branches", {}, ctx).success is True
+    # Third branch_op call of any kind this step hits the shared tier cap.
+    result = gateway.call_tool("fork_branch", {}, ctx)
+    assert result.success is False
+    assert result.error_code == "RATE_LIMITED"

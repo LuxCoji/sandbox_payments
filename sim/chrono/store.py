@@ -80,7 +80,7 @@ class PostgresChronoDAG(ChronoDAG):
                 cur.execute(
                     '''
                     INSERT INTO branches (
-                        branch_id, parent_branch_id, parent_checkpoint_id, 
+                        branch_id, parent_branch_id, parent_checkpoint_id,
                         created_at_ns, seed_offset, head_seq_num, metadata
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ''',
@@ -280,6 +280,32 @@ class PostgresChronoDAG(ChronoDAG):
             cur.execute("DELETE FROM checkpoints WHERE branch_id = %s", (branch_id,))
             cur.execute("DELETE FROM branches WHERE branch_id = %s", (branch_id,))
 
+    @traced("ChronoDAG.update_branch_metadata")
+    def update_branch_metadata(self, branch_id: str, metadata: dict[str, object]) -> Branch:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "UPDATE branches SET metadata = %s WHERE branch_id = %s RETURNING branch_id",
+                (json.dumps(metadata), branch_id),
+            )
+            if cur.fetchone() is None:
+                raise ValueError(f"Branch {branch_id!r} not found")
+            cur.execute(
+                "SELECT parent_branch_id, parent_checkpoint_id, created_at_ns, seed_offset, head_seq_num, metadata "
+                "FROM branches WHERE branch_id = %s",
+                (branch_id,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            return Branch(
+                branch_id=branch_id,
+                parent_branch_id=row[0],
+                parent_checkpoint_id=row[1],
+                created_at_ns=row[2],
+                seed_offset=row[3],
+                head_seq_num=row[4],
+                metadata=row[5],
+            )
+
     @traced("ChronoDAG.reset")
     def reset(self) -> None:
         with self.conn.cursor() as cur:
@@ -305,10 +331,10 @@ class PostgresChronoDAG(ChronoDAG):
 
         with self.conn.cursor() as cur:
             # Look backwards through the lineage for the most recent checkpoint
-            for branch, b_start, b_end in reversed(lineage):
+            for branch, _b_start, b_end in reversed(lineage):
                 cur.execute(
                     '''
-                    SELECT checkpoint_id, branch_id, event_number, sim_time_ns, 
+                    SELECT checkpoint_id, branch_id, event_number, sim_time_ns,
                            state_hash, aggregate_snapshot, rng_state, metadata
                     FROM checkpoints
                     WHERE branch_id = %s AND event_number <= %s
@@ -369,7 +395,8 @@ class PostgresChronoDAG(ChronoDAG):
                     if b_start <= at_event <= b_end:
                         cur.execute("SELECT aggregate_snapshot FROM checkpoints WHERE branch_id = %s AND event_number = %s", (branch, at_event))
                         row = cur.fetchone()
-                        if row: return json.loads(row[0])
+                        if row:
+                            return json.loads(row[0])
                 return None
 
             state_a = fetch_snapshot(branch_a)
@@ -433,7 +460,7 @@ class PostgresChronoDAG(ChronoDAG):
                 if overlap_start <= overlap_end:
                     cur.execute(
                         '''
-                        SELECT event_id, seq_num, event_type, sim_time_ns, actor_id, 
+                        SELECT event_id, seq_num, event_type, sim_time_ns, actor_id,
                                payload, causation_id, correlation_id
                         FROM events
                         WHERE branch_id = %s AND seq_num >= %s AND seq_num <= %s

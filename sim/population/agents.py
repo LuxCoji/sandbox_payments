@@ -7,14 +7,16 @@ action loops in the discrete-event simulation queue.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sim.core.interfaces import (
     ActorRole,
     MerchantDirectoryEntry,
 )
 from sim.population.behaviour import PopulationBehaviourModel, _generate_deterministic_uuid
-from sim.scheduler.rng import DeterministicRNG
+
+if TYPE_CHECKING:
+    from sim.scheduler.rng import DeterministicRNG
 
 
 @dataclass(frozen=True)
@@ -77,7 +79,7 @@ class PopulationManager:
         self._merchants.clear()
 
         # 1. Create Merchants first (so users have merchants to transact with)
-        for i in range(num_merchants):
+        for _i in range(num_merchants):
             merchant_id = _generate_deterministic_uuid(self._root_rng)
             rng = self._behaviour_model.get_entity_rng(merchant_id, "merchant")
             init_data = self._behaviour_model.initialize_entity(
@@ -108,7 +110,7 @@ class PopulationManager:
                 )
 
         # 2. Create Users
-        for i in range(num_users):
+        for _i in range(num_users):
             user_id = _generate_deterministic_uuid(self._root_rng)
             rng = self._behaviour_model.get_entity_rng(user_id, "user")
             init_data = self._behaviour_model.initialize_entity(

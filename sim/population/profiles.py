@@ -13,10 +13,9 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, cast
 
-from sim.core.interfaces import TransactionType
-from sim.population.interfaces import ActionProfile, CalibratedParams
-
 if TYPE_CHECKING:
+    from sim.core.interfaces import TransactionType
+    from sim.population.interfaces import ActionProfile, CalibratedParams
     from sim.scheduler.rng import DeterministicRNG
 
 

@@ -21,24 +21,37 @@
 #   - nvidia: unofficial — no published number, ~40 RPM is developer-forum
 #     consensus only, treat as unreliable
 
+# Model ids verified live against each provider's own /models endpoint on
+# 2026-08-28 (with real keys, for groq/gemini/nvidia — openrouter checked
+# unauthenticated against its public model list since no key was configured
+# yet). Free-tier models rotate/deprecate often on all four providers —
+# re-verify with the same query if a deployment starts 404ing:
+#   groq:     curl -H "Authorization: Bearer $GROQ_API_KEY_1" https://api.groq.com/openai/v1/models
+#   gemini:   curl "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY_PROJECT_1"
+#   nvidia:   curl -H "Authorization: Bearer $NVIDIA_API_KEY_1" https://integrate.api.nvidia.com/v1/models
+#   openrouter: curl https://openrouter.ai/api/v1/models   (no auth needed to list)
 deployments:
   - provider: groq
-    litellm_model: groq/llama-3.3-70b-versatile
+    litellm_model: groq/openai/gpt-oss-120b
     api_key_env: GROQ_API_KEY_1
     rpm: 30
 
   - provider: openrouter
-    litellm_model: openrouter/meta-llama/llama-3.3-70b-instruct:free
+    litellm_model: openrouter/google/gemma-4-31b-it:free
     api_key_env: OPENROUTER_API_KEY_1
     rpm: 20
 
   - provider: gemini
-    litellm_model: gemini/gemini-1.5-flash
+    litellm_model: gemini/gemini-3.5-flash-lite
     api_key_env: GEMINI_API_KEY_PROJECT_1
     rpm: 15 # soft — verify against aistudio.google.com/rate-limit for your project
 
   - provider: nvidia
-    litellm_model: nvidia_nim/meta/llama-3.1-70b-instruct
+    # Model *catalog* access varies per NVIDIA account even when the model
+    # is listed at GET /v1/models — nvidia/llama-3.1-nemotron-70b-instruct
+    # 404'd as "not found for account" despite being listed; this one was
+    # the first candidate that actually returned a completion for this key.
+    litellm_model: nvidia_nim/meta/llama-3.2-11b-vision-instruct
     api_base: "https://integrate.api.nvidia.com/v1"
     api_key_env: NVIDIA_API_KEY_1
     rpm: 40 # unofficial community estimate, soft cap

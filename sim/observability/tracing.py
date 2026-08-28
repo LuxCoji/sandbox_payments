@@ -26,7 +26,7 @@ def setup_tracing(service_name: str = "finsim") -> None:
 
 def traced(name: str | None = None) -> Callable:
     """Decorator to automatically trace a function or method.
-    
+
     Usage:
         @traced("WorldEngine.execute_command")
         def execute_command(self, cmd):

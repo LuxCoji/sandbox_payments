@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from sim.population.calibration import calibrate_from_csv, save_calibrated_params
+from sim.population.calibration import calibrate_from_csv, save_calibrated_params  # noqa: E402
 
 
 def main() -> None:

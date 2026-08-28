@@ -8,6 +8,8 @@ verify protocol conformance and not just attribute presence.
 """
 from __future__ import annotations
 
+import pytest
+
 from sim.chrono.interfaces import ChronoDAG, FieldDelta, StoredEvent
 from sim.chrono.tests._fake_dag import InMemoryChronoDAG
 
@@ -52,6 +54,34 @@ def test_fork_produces_independent_seed_offset_and_lineage() -> None:
     # Independent RNG stream derivation per fork (per rng_design.md: seed_offset
     # is derived from the branch name, so different branch names diverge).
     assert branch_a.seed_offset != branch_b.seed_offset
+
+
+def test_update_branch_metadata_overwrites_and_returns_branch() -> None:
+    dag = InMemoryChronoDAG()
+    for i in range(1, 4):
+        dag.save_event(_event("main", i))
+    cp = dag.create_checkpoint(
+        branch_id="main", event_number=3, sim_time_ns=3.0,
+        state_hash="h1", aggregate_snapshot=b'{"accounts": {}}', rng_state=b"rng",
+    )
+    branch = dag.fork(checkpoint_id=cp.checkpoint_id, branch_id="red-team/session-1/attempt-a",
+                       metadata={"origin": "agent_experiment"})
+    assert branch.metadata == {"origin": "agent_experiment"}
+
+    updated = dag.update_branch_metadata(
+        branch.branch_id, {**branch.metadata, "origin": "committed"}
+    )
+    assert updated.metadata == {"origin": "committed"}
+    # Other Branch fields (lineage, seed_offset, head_seq_num) unchanged.
+    assert updated.parent_branch_id == branch.parent_branch_id
+    assert updated.seed_offset == branch.seed_offset
+    assert updated.head_seq_num == branch.head_seq_num
+
+
+def test_update_branch_metadata_unknown_branch_raises() -> None:
+    dag = InMemoryChronoDAG()
+    with pytest.raises(ValueError, match="not found"):
+        dag.update_branch_metadata("does-not-exist", {"origin": "committed"})
 
 
 def test_replay_after_fork_inherits_parent_lineage_then_diverges() -> None:

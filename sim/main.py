@@ -21,13 +21,19 @@ from sim.scheduler.rng import DeterministicRNG
 logger = get_logger("finsim.cli")
 
 
+def _require_db_url(config: SimConfig) -> str:
+    if not config.db_url:
+        raise SystemExit("No database URL: set FINSIM_DB_URL in the environment/.env or pass db_url on SimConfig")
+    return config.db_url
+
+
 def build_simulation(config: SimConfig) -> tuple[WorldEngineImpl, ToolGatewayImpl, PostgresChronoDAG]:
     rng = DeterministicRNG.from_seed(config.seed)
     env = SimulationEnv()
 
     # Chrono is wired into the engine so execute_command() persists every
     # emitted event via the Emit -> Append -> Apply pipeline (see engine.py).
-    chrono = PostgresChronoDAG(config.db_url)
+    chrono = PostgresChronoDAG(_require_db_url(config))
     engine = WorldEngineImpl(env=env, rng=rng, chrono=chrono)
 
     registry = ToolRegistry()
@@ -37,6 +43,74 @@ def build_simulation(config: SimConfig) -> tuple[WorldEngineImpl, ToolGatewayImp
     _register_core_tools(registry, engine)
 
     return engine, gateway, chrono
+
+
+def build_simulation_for_branch(
+    config: SimConfig, branch_id: str
+) -> tuple[WorldEngineImpl, ToolGatewayImpl, PostgresChronoDAG]:
+    """Reconstruct a live simulation rooted at branch_id's latest checkpoint.
+
+    Unlike build_simulation() (always fresh, always "main"), this restores
+    engine state from a ChronoDAG checkpoint — the mechanism a red-team
+    session uses to run on a forked branch. See
+    docs/redteam_agent_design.md §3/§6 Phase 3.
+
+    Known limitations (documented, not silently papered over):
+      - Only supports checkout()ing a branch whose latest checkpoint is
+        exactly at the branch head (replay_ctx.pending_events is empty).
+        Nothing in this codebase deserializes StoredEvent.payload dicts back
+        into live DomainEvent instances to replay into a rebuilt engine —
+        that's a separate, unbuilt capability. The intended v1 usage
+        (checkpoint immediately before fork, fork immediately from that
+        checkpoint) never produces pending events, so this raises loudly
+        instead of silently reconstructing stale/wrong state.
+      - The scheduler's pending-event queue (SimulationEnv._queue) is not
+        part of the checkpoint and is NOT restored — the rebuilt engine
+        starts with an empty queue, no organic background traffic "in
+        flight". See docs/redteam_agent_design.md "Known limitations".
+      - Requires the checkpoint's aggregate_snapshot to have been produced
+        by WorldEngineImpl.get_full_snapshot_bytes(), not
+        get_canonical_state_bytes() (the latter is lossy, hash-only — see
+        that method's docstring). Checkpoints created by api/sim_session.py
+        use the lossy form for its own live in-process forking and are NOT
+        restorable through this function.
+    """
+    chrono = PostgresChronoDAG(_require_db_url(config))
+    replay_ctx = chrono.checkout(branch_id)
+
+    if replay_ctx.pending_events:
+        raise NotImplementedError(
+            f"branch {branch_id!r} has {len(replay_ctx.pending_events)} event(s) "
+            "after its latest checkpoint. build_simulation_for_branch() only "
+            "supports checkpoint-at-head reconstruction — replaying "
+            "StoredEvents back into a rebuilt engine isn't implemented. "
+            "Create a fresh checkpoint at the branch's current head before "
+            "calling this."
+        )
+
+    # The seed passed to from_seed() here is a throwaway placeholder —
+    # set_state() immediately overwrites the seed sequence and generator
+    # state wholesale with the checkpoint's actual RNG state.
+    rng = DeterministicRNG.from_seed(0)
+    rng.set_state(replay_ctx.checkpoint.rng_state)
+
+    env = SimulationEnv(start_time_ns=int(replay_ctx.checkpoint.sim_time_ns))
+
+    engine = WorldEngineImpl(
+        env=env, rng=rng, branch_id=branch_id, chrono=chrono,
+        seq_num=replay_ctx.checkpoint.event_number,
+    )
+    engine.restore_full_snapshot_bytes(replay_ctx.checkpoint.aggregate_snapshot)
+
+    registry = ToolRegistry()
+    rate_limiter = RateLimiter()
+    gateway = ToolGatewayImpl(registry=registry, rate_limiter=rate_limiter, engine=engine)
+
+    _register_core_tools(registry, engine)
+    _register_redteam_tools(registry, engine, chrono)
+
+    return engine, gateway, chrono
+
 
 def _register_core_tools(registry: ToolRegistry, engine: WorldEngineImpl) -> None:
     import uuid
@@ -49,7 +123,7 @@ def _register_core_tools(registry: ToolRegistry, engine: WorldEngineImpl) -> Non
         return []
 
     registry.register_tool(
-        ToolSpec("create_account", "Create a new account", (), frozenset()),
+        ToolSpec("create_account", "Create a new account", frozenset(), {}),
         create_account_handler
     )
 
@@ -67,7 +141,7 @@ def _register_core_tools(registry: ToolRegistry, engine: WorldEngineImpl) -> Non
         return engine.execute_command(cmd).events
 
     registry.register_tool(
-        ToolSpec("transfer_funds", "Transfer funds", (Capability.TRANSFER_FUNDS,), frozenset({"events"})),
+        ToolSpec("transfer_funds", "Transfer funds", frozenset({Capability.TRANSFER_FUNDS}), {}),
         transfer_funds_handler
     )
 
@@ -86,7 +160,7 @@ def _register_core_tools(registry: ToolRegistry, engine: WorldEngineImpl) -> Non
         return engine.execute_command(cmd).events
 
     registry.register_tool(
-        ToolSpec("make_payment", "Make a payment", (Capability.MAKE_PAYMENT,), frozenset({"events"})),
+        ToolSpec("make_payment", "Make a payment", frozenset({Capability.MAKE_PAYMENT}), {}),
         make_payment_handler
     )
 
@@ -100,8 +174,33 @@ def _register_core_tools(registry: ToolRegistry, engine: WorldEngineImpl) -> Non
         return []
 
     registry.register_tool(
-        ToolSpec("inspect_account", "Inspect account details", (Capability.VIEW_OWN_ACCOUNT,), frozenset({"events"})),
+        ToolSpec("inspect_account", "Inspect account details", frozenset({Capability.VIEW_OWN_ACCOUNT}), {}),
         inspect_account_handler
+    )
+
+
+def _register_redteam_tools(registry: ToolRegistry, engine: WorldEngineImpl, chrono: PostgresChronoDAG) -> None:
+    """Tools only meaningful on a red-team session's branch — not registered
+    by build_simulation() (main), only by build_simulation_for_branch().
+    See docs/redteam_agent_design.md §3.
+    """
+    from sim.gateway.interfaces import Capability, ToolSpec
+
+    def commit_strategy_handler(context, params, engine):
+        branch = chrono.checkout(context.branch_id).branch
+        chrono.update_branch_metadata(context.branch_id, {**branch.metadata, "origin": "committed"})
+        return []
+
+    registry.register_tool(
+        ToolSpec(
+            "commit_strategy",
+            "Tag the current branch as the red-team agent's committed strategy "
+            "(vs. a throwaway exploratory attempt)",
+            frozenset({Capability.FORK_BRANCH}),
+            {},
+            rate_limit_tier="branch_op",
+        ),
+        commit_strategy_handler,
     )
 
 def _resolve_db_url(args: argparse.Namespace) -> str:

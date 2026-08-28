@@ -198,7 +198,7 @@ def test_deterministic_reproducibility() -> None:
     intents2 = model2.propose_actions(actor_id, world_view)
 
     assert len(intents1) == len(intents2)
-    for i1, i2 in zip(intents1, intents2):
+    for i1, i2 in zip(intents1, intents2, strict=False):
         assert i1.action_type == i2.action_type
         assert i1.amount_paise == i2.amount_paise
         assert i1.target_id == i2.target_id

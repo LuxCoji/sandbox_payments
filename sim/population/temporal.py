@@ -8,10 +8,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sim.core.interfaces import TransactionType
-from sim.population.interfaces import CalibratedParams
-
 if TYPE_CHECKING:
+    from sim.core.interfaces import TransactionType
+    from sim.population.interfaces import CalibratedParams
     from sim.scheduler.rng import DeterministicRNG
 
 # Time constants in nanoseconds
@@ -89,10 +88,7 @@ class TemporalModel:
         """
         # Find the maximum rate for thinning (upper bound lambda)
         matrix = self._params.temporal_rate_matrix.get(action_type)
-        if not matrix:
-            max_rate = 1.0
-        else:
-            max_rate = max(max(day) for day in matrix)
+        max_rate = 1.0 if not matrix else max(max(day) for day in matrix)
 
         max_rate_per_agent = max(0.01, max_rate) / max(1, population_size)
         lambda_star = max_rate_per_agent

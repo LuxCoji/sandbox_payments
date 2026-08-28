@@ -25,7 +25,7 @@ def hash_object(obj: Any) -> str:
 class IncrementalHasher:
     """
     Computes a deterministic SHA-256 state hash using a Merkle-tree approach.
-    
+
     Maintains hashes of individual entities so that the global state hash
     can be recomputed efficiently without re-serializing the entire world state
     every time a single account changes.
@@ -49,7 +49,7 @@ class IncrementalHasher:
     def get_state_hash(self) -> str:
         """
         Compute the root hash of the entire state.
-        
+
         1. Computes an aggregate hash for each entity type (e.g., 'accounts', 'devices').
         2. Computes the final root hash over all aggregate hashes.
         """

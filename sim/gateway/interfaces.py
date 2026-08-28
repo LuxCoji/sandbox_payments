@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from sim.core.interfaces import ActorRole
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class Capability(enum.Enum):
@@ -92,6 +95,13 @@ ROLE_CAPABILITIES: dict[ActorRole, frozenset[Capability]] = {
         Capability.REGISTER_DEVICE,
         Capability.VIEW_TRANSACTIONS,
         Capability.CREATE_ACCOUNT,
+        # Branch ops — the agent's own exploratory-forking instrument, see
+        # docs/redteam_agent_design.md §3. Rate-limited separately via
+        # ToolSpec.rate_limit_tier="branch_op", these are not "free" just
+        # because they're granted.
+        Capability.FORK_BRANCH,
+        Capability.REPLAY_BRANCH,
+        Capability.DIFF_BRANCHES,
     }),
     ActorRole.BLUE_AGENT: frozenset({
         Capability.VIEW_ALL_ACCOUNTS,
@@ -116,6 +126,13 @@ class ToolSpec:
     rate_limit_per_day: int | None = None    # Max calls per sim day (None = unlimited)
     visible_fields: dict[ActorRole, frozenset[str]] = field(default_factory=dict)
                                              # Role → set of output fields visible
+    rate_limit_tier: str = "normal"          # Additional tier-wide cap, keyed independently
+                                             # of the per-tool limits above — see
+                                             # sim.gateway.policy.TIER_LIMITS. "branch_op"
+                                             # tools (fork/checkout/diff/commit) are far more
+                                             # expensive than a payment call and share one
+                                             # tighter budget regardless of which specific
+                                             # branch tool is invoked.
 
 
 @dataclass(frozen=True)
@@ -151,7 +168,7 @@ class ToolGateway(Protocol):
         3. Output field visibility filtering based on actor role
     """
 
-    def register_tool(self, spec: ToolSpec) -> None:
+    def register_tool(self, spec: ToolSpec, handler: Callable) -> None:
         """Register a new tool with the gateway."""
         ...
 

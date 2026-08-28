@@ -119,6 +119,22 @@ class InMemoryChronoDAG:
             self._checkpoints.pop(cp_id, None)
         self._events = [e for e in self._events if e.branch_id != branch_id]
 
+    def update_branch_metadata(self, branch_id: str, metadata: dict[str, object]) -> Branch:
+        existing = self._branches.get(branch_id)
+        if existing is None:
+            raise ValueError(f"Branch {branch_id!r} not found")
+        updated = Branch(
+            branch_id=existing.branch_id,
+            parent_checkpoint_id=existing.parent_checkpoint_id,
+            parent_branch_id=existing.parent_branch_id,
+            created_at_ns=existing.created_at_ns,
+            seed_offset=existing.seed_offset,
+            head_seq_num=existing.head_seq_num,
+            metadata=metadata,
+        )
+        self._branches[branch_id] = updated
+        return updated
+
     def reset(self) -> None:
         self._branches.clear()
         self._checkpoints.clear()

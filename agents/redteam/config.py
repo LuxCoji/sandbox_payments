@@ -39,9 +39,22 @@ class RedTeamConfig(BaseSettings):
     # documented superlinear event-growth gotcha in CLAUDE.md).
     warmup_hours: float = 3.0
 
-    session_max_plan_calls: int = 8
+    # Lockstep: one LLM decision -> one call_tool() per step. This caps how
+    # many actions a single session takes before ending (independent of the
+    # commit_strategy tool, which can also end a session early).
+    session_max_steps: int = 8
     retry_backoff_base_s: float = 2.0
     retry_backoff_max_s: float = 120.0
+
+    # Route litellm's routing/latency/token telemetry (and the agent's
+    # parsed "reasoning" per turn) into the OTLP pipeline sim.observability
+    # already points at Grafana Cloud — never the terminal. Defaults True so
+    # real runs get this without extra flags; explicitly set False in test
+    # fixtures rather than relying on OTEL_EXPORTER_OTLP_ENDPOINT being
+    # absent — importing litellm loads .env as a side effect (a known
+    # litellm quirk), which leaks the real endpoint into every process
+    # regardless of test intent, so absence-of-env-var is not a safe gate.
+    enable_otel_tracing: bool = True
 
     model_config = SettingsConfigDict(env_prefix="FINSIM_REDTEAM_", env_file=".env", extra="ignore")
 

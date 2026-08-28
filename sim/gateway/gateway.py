@@ -52,7 +52,10 @@ class ToolGatewayImpl:
                 error_message=cap_err
             )
 
-        # Check rate limits
+        # Check rate limits — per-tool, then tier-wide (e.g. "branch_op"
+        # covers fork/checkout/diff/commit_strategy under one shared budget
+        # regardless of per-tool limits above; "normal" tier has no
+        # additional cap, see sim.gateway.policy.TIER_LIMITS).
         rl_err = self._rate_limiter.check_and_increment(
             context.actor_id, tool_name, self._engine.sim_time_ns,
             spec.rate_limit_per_step, spec.rate_limit_per_day
@@ -61,6 +64,15 @@ class ToolGatewayImpl:
             return ToolResult(
                 success=False, tool_name=tool_name, error_code="RATE_LIMITED",
                 error_message=rl_err
+            )
+
+        tier_err = self._rate_limiter.check_and_increment_tier(
+            context.actor_id, spec.rate_limit_tier, self._engine.sim_time_ns
+        )
+        if tier_err:
+            return ToolResult(
+                success=False, tool_name=tool_name, error_code="RATE_LIMITED",
+                error_message=tier_err
             )
 
         try:
