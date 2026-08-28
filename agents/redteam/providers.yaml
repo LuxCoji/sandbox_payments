@@ -1,0 +1,44 @@
+# Provider/account pool for the red-team persona's LLM calls, loaded into a
+# litellm.Router model_list at startup (see llm_router.py). All deployments
+# share one model_name ("redteam-agent" by default) and act as a rotation
+# pool the router fails over across to survive free-tier rate limits — this
+# is a single persona spread across providers, not multiple personas.
+#
+# CAUTION — read before adding entries: Groq and OpenRouter rate-limit at the
+# account/org level, not per API key (confirmed from their own docs). Adding
+# a second `api_key_env` entry only buys real extra quota if it points to a
+# genuinely separate account/org, not a second key on the same one. Using
+# multiple accounts to multiply a single free tier's quota sits in a ToS gray
+# area for both providers. This is your own sandbox research project and your
+# call to make — just don't do it on autopilot.
+#
+# `rpm` values below are soft/advisory hints for litellm.Router's rate-limit-
+# aware routing, not authoritative:
+#   - groq: published, org-level (console.groq.com/docs/rate-limits)
+#   - openrouter: published, account-level (openrouter.ai/docs/api-reference/limits)
+#   - gemini: NOT a stable constant — per-project, read the live value from
+#     https://aistudio.google.com/rate-limit and update here periodically
+#   - nvidia: unofficial — no published number, ~40 RPM is developer-forum
+#     consensus only, treat as unreliable
+
+deployments:
+  - provider: groq
+    litellm_model: groq/llama-3.3-70b-versatile
+    api_key_env: GROQ_API_KEY_1
+    rpm: 30
+
+  - provider: openrouter
+    litellm_model: openrouter/meta-llama/llama-3.3-70b-instruct:free
+    api_key_env: OPENROUTER_API_KEY_1
+    rpm: 20
+
+  - provider: gemini
+    litellm_model: gemini/gemini-1.5-flash
+    api_key_env: GEMINI_API_KEY_PROJECT_1
+    rpm: 15 # soft — verify against aistudio.google.com/rate-limit for your project
+
+  - provider: nvidia
+    litellm_model: nvidia_nim/meta/llama-3.1-70b-instruct
+    api_base: "https://integrate.api.nvidia.com/v1"
+    api_key_env: NVIDIA_API_KEY_1
+    rpm: 40 # unofficial community estimate, soft cap

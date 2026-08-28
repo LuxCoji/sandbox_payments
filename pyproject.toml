@@ -41,9 +41,13 @@ dev = [
     "mypy",
     "import-linter",
 ]
+redteam = [
+    "litellm>=1.63",
+    "langgraph>=0.2",
+]
 
 [tool.pytest.ini_options]
-testpaths = ["sim", "tests"]
+testpaths = ["sim", "tests", "agents"]
 asyncio_mode = "auto"
 # Default is ["test_*.py", "*_test.py"] which silently never collects the
 # contract_test_*.py files under sim/*/tests/ (make test-contract's `-k
@@ -170,6 +174,12 @@ forbidden_modules = [
     "sim.chrono.replay",
     "sim.chrono.hashing",
 ]
+
+[[tool.importlinter.contracts]]
+name = "Sim does not import the red-team harness"
+type = "forbidden"
+source_modules = ["sim"]
+forbidden_modules = ["agents"]
 
 [[tool.importlinter.contracts]]
 name = "No direct simpy imports outside scheduler"

@@ -37,3 +37,6 @@ baselines/
 # Frontend
 frontend/node_modules/
 frontend/dist/
+
+# Red-team harness — local persona identity bookkeeping (not simulation state)
+agents/redteam/.persona_identity.json

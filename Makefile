@@ -1,4 +1,4 @@
-.PHONY: test test-contract test-integration lint typecheck calibrate run regress install api frontend frontend-install
+.PHONY: test test-contract test-integration lint typecheck calibrate run regress install install-redteam api frontend frontend-install redteam
 
 test:
 	uv run pytest -xvs
@@ -14,7 +14,7 @@ lint:
 	uv run lint-imports
 
 typecheck:
-	uv run mypy sim/
+	uv run mypy sim/ agents/
 
 calibrate:
 	uv run python scripts/calibrate.py
@@ -28,6 +28,9 @@ regress:
 install:
 	uv sync --extra dev
 
+install-redteam:
+	uv sync --extra redteam
+
 # Web UI: FastAPI backend (in-process live simulation + ChronoDAG) on :8000,
 # and the Vite/React frontend on :5173 (proxies /api -> :8000). Run each in
 # its own terminal: `make api` then `make frontend`.
@@ -39,3 +42,8 @@ frontend-install:
 
 frontend:
 	cd frontend && npm run dev
+
+# Red-team LLM agent harness (requires `make install-redteam` first, and
+# provider API keys in .env — see agents/redteam/providers.yaml).
+redteam:
+	uv run python scripts/red_team_run.py
