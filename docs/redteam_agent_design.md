@@ -473,6 +473,56 @@ target account as a payment *destination*.
 
 ---
 
+## 11. Session continuation — resuming and pooling findings across sessions
+
+Two real gaps existed until now: (1) `commit_strategy`'s actual reasoning
+text — the LLM's own summary of what it demonstrated, the thing worth
+keeping — was never written anywhere durable, only branch metadata's
+`origin: "committed"` flag was; (2) a red-team branch was never
+checkpointed after its initial fork, so there was no checkpoint_id to hand
+to a new session's `--checkpoint` even if you wanted to continue from where
+one left off — "resume" was structurally impossible, not just unbuilt.
+
+**Design choice, and why**: the alternative was one long-running session
+(raise `session_max_steps` a lot, no resume concept needed at all — the
+agent just keeps finding more within a single continuous run). Rejected
+that in favor of bounded sessions + explicit continuation:
+- A single very long session still hits the same "forgets beyond the
+  history window" problem (§9) internally — going longer doesn't remove
+  the need for durable memory, it just makes losing it more expensive.
+- Bounded sessions give natural checkpoints for a human to actually look
+  at what happened before deciding whether to continue, redirect, or stop
+  — losing that in exchange for one uninterrupted run is a real cost, not
+  a simplification.
+- A checkpoint per session end also means multiple *next* sessions can
+  fork from the same commit point to explore different directions in
+  parallel, which a single continuous run can't do at all.
+
+**What's now built**: every session (`run_session()`/`run_session_via_graph()`
+in `agents/redteam/harness.py`, both paths) ends with `_checkpoint_branch_end()`
+— a real checkpoint of the branch's state, whether it ended via
+`commit_strategy` or just hit the step cap — tagged with
+`{"origin": "session_end", "session_id", "committed"}` and returned as
+`SessionResult.end_checkpoint_id` (threaded through `RedTeamSessionState`/
+the frontend). On a successful `commit_strategy`, `_record_commit_reasoning()`
+additionally writes the LLM's own reasoning text onto the branch's metadata
+as `commit_reasoning` — the exact text visible in the UI step feed, now also
+durable.
+
+**Pooling, not just state restoration**: forking from a checkpoint alone
+only restores engine *state* (account balances exactly as they were) — a
+naively "continued" session would have zero idea what a prior pass already
+found and would waste steps rediscovering it. `_seed_notes_from_parent()`
+closes that: if the checkpoint being forked from lives on another
+`red-team/*` branch (not a `main` warmup), the new session's `notes` list
+is seeded with that branch's `target_notes` and `commit_reasoning` before
+the first turn even runs — the agent's very first world-view prompt already
+says what a previous pass on this lineage concluded. In the UI, a finished
+session with an `end_checkpoint_id` shows a "▶ Continue from here" button
+(`RedTeamDashboard.tsx`) that pre-fills the start form with it.
+
+---
+
 ## Known limitations
 
 - **Forked red-team branches resume with an empty scheduler queue.**

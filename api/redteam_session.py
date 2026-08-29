@@ -38,6 +38,12 @@ class RedTeamSessionState:
     steps_taken: int = 0
     max_steps: int = 0  # filled in once RedTeamConfig is built — 0 until then, not yet known
     committed: bool = False
+    # A checkpoint of the branch at session end (whether committed or not) —
+    # pass this as checkpoint_id on a new session to continue from exactly
+    # where this one left off (agents/redteam/harness.py::_checkpoint_branch_end).
+    # That new session also automatically pools this one's target_notes/
+    # commit_reasoning (_seed_notes_from_parent) instead of starting blind.
+    end_checkpoint_id: str | None = None
     error: str | None = None
     started_at: float = field(default_factory=time.time)
     step_log: list[dict[str, object]] = field(default_factory=list)
@@ -107,6 +113,7 @@ class RedTeamObserver:
             self._run_session_blocking(state, on_step, seed=seed)
             done_message: dict[str, object] = {
                 "type": "done", "status": state.status, "committed": state.committed, "error": state.error,
+                "end_checkpoint_id": state.end_checkpoint_id,
             }
             loop.call_soon_threadsafe(self._broadcast, session_id, done_message)
 
@@ -141,6 +148,7 @@ class RedTeamObserver:
             state.branch_id = result.branch_id
             state.steps_taken = result.steps_taken
             state.committed = result.committed
+            state.end_checkpoint_id = result.end_checkpoint_id
             state.status = "done"
         except Exception as exc:  # report to the frontend rather than crash the executor thread
             state.status = "error"

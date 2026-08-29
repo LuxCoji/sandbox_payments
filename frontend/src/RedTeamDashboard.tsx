@@ -89,7 +89,11 @@ export default function RedTeamDashboard({ initialCheckpointId, initialSessionId
           prev ? { ...prev, steps_taken: step.step, step_log: [...prev.step_log, step] } : prev
         );
       } else if (data.type === "done") {
-        setLive((prev) => (prev ? { ...prev, status: data.status, committed: data.committed, error: data.error } : prev));
+        setLive((prev) =>
+          prev
+            ? { ...prev, status: data.status, committed: data.committed, error: data.error, end_checkpoint_id: data.end_checkpoint_id }
+            : prev
+        );
       }
     };
     return () => {
@@ -108,7 +112,8 @@ export default function RedTeamDashboard({ initialCheckpointId, initialSessionId
       setSessions((prev) => [
         {
           session_id, status: "running", from_genesis: fromGenesis, checkpoint_id: checkpointId || null,
-          use_graph: useGraph, branch_id: null, steps_taken: 0, max_steps: 0, committed: false, error: null,
+          use_graph: useGraph, branch_id: null, steps_taken: 0, max_steps: 0, committed: false,
+          end_checkpoint_id: null, error: null,
           started_at: Date.now() / 1000, step_log: [],
         },
         ...prev,
@@ -234,6 +239,22 @@ export default function RedTeamDashboard({ initialCheckpointId, initialSessionId
               {live.branch_id && <CopyChip value={live.branch_id} display={`branch ${shortId(live.branch_id, 24)}`} />}
               <span className="pill">committed <b>{live.committed ? "yes" : "no"}</b></span>
               <span className="pill">orchestration <b>{live.use_graph ? "LangGraph" : "lockstep loop"}</b></span>
+              {live.end_checkpoint_id && (
+                <>
+                  <CopyChip value={live.end_checkpoint_id} display={`checkpoint ${shortId(live.end_checkpoint_id, 13)}…`} />
+                  <button
+                    className="btn small"
+                    style={{ borderColor: "var(--violet)", color: "var(--violet)" }}
+                    onClick={() => {
+                      setCheckpointId(live.end_checkpoint_id!);
+                      setFromGenesis(false);
+                    }}
+                    title="Fork a new session from this one's end state — it also inherits this session's save_note/commit_strategy findings, not just the account balances"
+                  >
+                    ▶ Continue from here
+                  </button>
+                </>
+              )}
             </div>
 
             {live.error && (

@@ -44,6 +44,13 @@ class SessionResult:
     steps_taken: int
     committed: bool
     step_log: list[dict[str, object]] = field(default_factory=list)
+    # A checkpoint of the branch's state at the moment the session ended
+    # (committed or not) — without this there was no checkpoint anywhere
+    # on a red-team branch after the initial fork, so "start another
+    # session from where this one left off" was impossible: nothing to
+    # pass to --checkpoint. Always created, not just on commit, so a
+    # session that hit the step cap without committing is still resumable.
+    end_checkpoint_id: str | None = None
 
 
 # How many past steps decide_next_action() gets to see (docs/redteam_agent_design.md
@@ -134,7 +141,70 @@ def _warmup_checkpoint(sim_config: SimConfig, redteam_config: RedTeamConfig) -> 
     return str(checkpoint.checkpoint_id)
 
 
-def _fork_session_branch(sim_config: SimConfig, checkpoint_id: str, session_id: str) -> str:
+def _record_commit_reasoning(chrono: PostgresChronoDAG, branch_id: str, reasoning: str) -> None:
+    """Write the LLM's own reasoning for its commit_strategy call onto the
+    branch's metadata — commit_strategy_handler (sim/main.py) only ever set
+    origin="committed", the actual summary text (why the agent believes
+    this demonstrates something) was visible live in the UI step feed but
+    never written anywhere durable. Separate from commit_strategy_handler
+    itself because the handler only sees `parameters`, not the `reasoning`
+    field NextAction carries — the harness/graph node already has it.
+    """
+    branch = chrono.checkout(branch_id).branch
+    chrono.update_branch_metadata(branch_id, {**branch.metadata, "commit_reasoning": reasoning})
+
+
+def _checkpoint_branch_end(
+    chrono: PostgresChronoDAG, engine: WorldEngineImpl, branch_id: str, *, session_id: str, committed: bool
+) -> str:
+    """Checkpoint the branch's state at session end (committed or not) so a
+    later session can fork from exactly where this one left off — mirrors
+    _warmup_checkpoint()'s shape but for the red-team branch itself, not
+    "main". Before this, nothing ever checkpointed a red-team branch after
+    its initial fork, so "continue from this session" had no checkpoint_id
+    to actually use.
+    """
+    checkpoint = chrono.create_checkpoint(
+        branch_id=branch_id,
+        event_number=engine._seq_num,
+        sim_time_ns=engine.sim_time_ns,
+        state_hash=engine.get_state_hash(),
+        aggregate_snapshot=engine.get_full_snapshot_bytes(),
+        rng_state=engine._rng.get_state(),
+        metadata={"origin": "session_end", "session_id": session_id, "committed": committed},
+    )
+    logger.info(
+        "Session-end checkpoint created", checkpoint_id=checkpoint.checkpoint_id,
+        branch_id=branch_id, session_id=session_id, committed=committed,
+    )
+    return str(checkpoint.checkpoint_id)
+
+
+def _seed_notes_from_parent(chrono: PostgresChronoDAG, parent_branch_id: str | None) -> list[str]:
+    """If this session forked from a *previous red-team branch's* checkpoint
+    (session-continuation, as opposed to forking straight from a "main"
+    warmup), carry its findings forward instead of starting blank.
+
+    Forking from a checkpoint restores engine STATE (account balances
+    exactly as the prior session left them) but not KNOWLEDGE — without
+    this, a "continued" session would have no idea what a prior pass
+    already flagged and would have to rediscover it turn by turn, wasting
+    steps on state the branch's own metadata already recorded. Pools
+    `target_notes` (from save_note) and `commit_reasoning` (from
+    commit_strategy, see _record_commit_reasoning) off the parent branch.
+    """
+    if parent_branch_id is None or not parent_branch_id.startswith("red-team/"):
+        return []
+    parent_metadata = chrono.checkout(parent_branch_id).branch.metadata
+    parent_notes = parent_metadata.get("target_notes", [])
+    notes = [f"[from {parent_branch_id}] {n}" for n in parent_notes] if isinstance(parent_notes, list) else []
+    commit_reasoning = parent_metadata.get("commit_reasoning")
+    if isinstance(commit_reasoning, str) and commit_reasoning:
+        notes.append(f"[from {parent_branch_id}, prior session's commit_strategy] {commit_reasoning}")
+    return notes
+
+
+def _fork_session_branch(sim_config: SimConfig, checkpoint_id: str, session_id: str) -> tuple[str, str | None]:
     if not sim_config.db_url:
         raise SystemExit("No database URL: set FINSIM_DB_URL in the environment/.env")
     chrono = PostgresChronoDAG(sim_config.db_url)
@@ -143,7 +213,7 @@ def _fork_session_branch(sim_config: SimConfig, checkpoint_id: str, session_id: 
         branch_id=f"red-team/{session_id}",
         metadata={"origin": "agent_experiment"},
     )
-    return str(branch.branch_id)
+    return str(branch.branch_id), branch.parent_branch_id
 
 
 def _prepare_session(
@@ -154,18 +224,29 @@ def _prepare_session(
     session_id: str,
     router: Router | None,
     identity_file: Path | None,
-) -> tuple[WorldEngineImpl, ToolGatewayImpl, ActorContext, Router, str, str]:
+) -> tuple[WorldEngineImpl, ToolGatewayImpl, ActorContext, Router, str, str, PostgresChronoDAG, list[str]]:
     """Shared setup for both run_session() and run_session_via_graph():
     resolve/create the warmup checkpoint, fork the session branch, rebuild
     the engine on it, and bootstrap the agent's identity + LLM router.
+
+    Returns `chrono` too (previously discarded as `_chrono`) — both
+    callers need it at session end to checkpoint the branch and record
+    commit_strategy's reasoning (see _checkpoint_branch_end/
+    _record_commit_reasoning), not just at setup time. Also returns
+    `seed_notes` — forking from a checkpoint restores engine STATE, not
+    the prior session's KNOWLEDGE of what it already found; if the fork
+    point is itself a previous red-team session's end checkpoint, this
+    pools that session's target_notes/commit_reasoning so the new one
+    doesn't start blind (see _seed_notes_from_parent).
     """
     if from_genesis:
         warmup_checkpoint_id = _warmup_checkpoint(sim_config, redteam_config)
     elif warmup_checkpoint_id is None:
         raise ValueError("warmup_checkpoint_id is required unless from_genesis=True")
 
-    branch_id = _fork_session_branch(sim_config, warmup_checkpoint_id, session_id)
-    engine, gateway, _chrono = build_simulation_for_branch(sim_config, branch_id)
+    branch_id, parent_branch_id = _fork_session_branch(sim_config, warmup_checkpoint_id, session_id)
+    engine, gateway, chrono = build_simulation_for_branch(sim_config, branch_id)
+    seed_notes = _seed_notes_from_parent(chrono, parent_branch_id)
 
     if identity_file is not None:
         ctx = bootstrap_red_agent_context(
@@ -175,7 +256,7 @@ def _prepare_session(
         ctx = bootstrap_red_agent_context(branch_id=branch_id, session_id=session_id)
     router = router or build_router(redteam_config)
     tools_summary = summarize_tools(gateway.list_tools(ctx))
-    return engine, gateway, ctx, router, tools_summary, branch_id
+    return engine, gateway, ctx, router, tools_summary, branch_id, chrono, seed_notes
 
 
 def run_session(
@@ -205,14 +286,14 @@ def run_session(
     of this same loop (docs/redteam_agent_design.md §6 Phase 6).
     """
     session_id = session_id or _new_session_id()
-    engine, gateway, ctx, router, tools_summary, branch_id = _prepare_session(
+    engine, gateway, ctx, router, tools_summary, branch_id, chrono, seed_notes = _prepare_session(
         sim_config, redteam_config, warmup_checkpoint_id, from_genesis, session_id, router, identity_file,
     )
 
     result = SessionResult(branch_id=branch_id, session_id=session_id, steps_taken=0, committed=False)
     last_outcome: str | None = None
     history: list[str] = []
-    notes: list[str] = []  # from save_note — see summarize_target_notes()
+    notes: list[str] = list(seed_notes)  # own save_note calls + anything pooled from a parent session
 
     for _step in range(redteam_config.session_max_steps):
         view = engine.get_world_view(ctx.actor_id, ctx.actor_role)
@@ -263,11 +344,16 @@ def run_session(
 
         if action.tool_name == "commit_strategy" and tool_result.success:
             result.committed = True
+            _record_commit_reasoning(chrono, branch_id, action.reasoning)
             break
 
+    result.end_checkpoint_id = _checkpoint_branch_end(
+        chrono, engine, branch_id, session_id=session_id, committed=result.committed
+    )
     logger.info(
         "Session finished", session_id=session_id, branch_id=branch_id,
         steps_taken=result.steps_taken, committed=result.committed,
+        end_checkpoint_id=result.end_checkpoint_id,
     )
     return result
 
@@ -297,6 +383,7 @@ def build_graph(
     router: Router,
     redteam_config: RedTeamConfig,
     tools_summary: str,
+    chrono: PostgresChronoDAG,
     on_step: Callable[[dict[str, object]], None] | None = None,
 ) -> CompiledStateGraph:
     """LangGraph-orchestrated version of run_session()'s loop: observe ->
@@ -345,6 +432,8 @@ def build_graph(
             else f"{action['tool_name']} FAILED ({tool_result.error_code}): {tool_result.error_message}"
         )
         committed = action["tool_name"] == "commit_strategy" and tool_result.success
+        if committed:
+            _record_commit_reasoning(chrono, ctx.branch_id, str(action.get("reasoning", "")))
         steps_taken = state["steps_taken"] + 1
         if on_step is not None:
             on_step({
@@ -408,13 +497,13 @@ def run_session_via_graph(
     step semantics, orchestrated as a StateGraph instead of a Python loop.
     """
     session_id = session_id or _new_session_id()
-    engine, gateway, ctx, router, tools_summary, branch_id = _prepare_session(
+    engine, gateway, ctx, router, tools_summary, branch_id, chrono, seed_notes = _prepare_session(
         sim_config, redteam_config, warmup_checkpoint_id, from_genesis, session_id, router, identity_file,
     )
-    graph = build_graph(engine, gateway, ctx, router, redteam_config, tools_summary, on_step=on_step)
+    graph = build_graph(engine, gateway, ctx, router, redteam_config, tools_summary, chrono, on_step=on_step)
 
     initial_state: RedTeamGraphState = {
-        "world_summary": "", "last_outcome": None, "history": [], "notes": [], "action": None,
+        "world_summary": "", "last_outcome": None, "history": [], "notes": list(seed_notes), "action": None,
         "tool_result": None, "steps_taken": 0, "committed": False,
     }
     final_state = graph.invoke(initial_state)
@@ -423,8 +512,12 @@ def run_session_via_graph(
         branch_id=branch_id, session_id=session_id,
         steps_taken=final_state["steps_taken"], committed=final_state["committed"],
     )
+    result.end_checkpoint_id = _checkpoint_branch_end(
+        chrono, engine, branch_id, session_id=session_id, committed=result.committed
+    )
     logger.info(
         "Session finished (graph)", session_id=session_id, branch_id=branch_id,
         steps_taken=result.steps_taken, committed=result.committed,
+        end_checkpoint_id=result.end_checkpoint_id,
     )
     return result

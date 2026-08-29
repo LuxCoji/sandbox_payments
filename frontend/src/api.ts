@@ -91,6 +91,7 @@ export interface RedTeamSession {
   steps_taken: number;
   max_steps: number;
   committed: boolean;
+  end_checkpoint_id: string | null;
   error: string | null;
   started_at: number;
   step_log: RedTeamStep[];

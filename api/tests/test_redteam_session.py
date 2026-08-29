@@ -21,6 +21,7 @@ class _FakeResult:
     session_id: str
     steps_taken: int
     committed: bool
+    end_checkpoint_id: str | None = None
 
 
 def _fake_run_session_module(monkeypatch: pytest.MonkeyPatch, steps: list[dict[str, object]], committed: bool) -> None:
