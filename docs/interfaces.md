@@ -55,7 +55,7 @@ This document is the **single source of truth** for all contracts, data shapes, 
 - `MERCHANT`: Sees own accounts and payer pseudonymous IDs.
 - `BANK_OPS`: Sees all accounts (PII masked) and risk scores.
 - `RISK_ANALYST`: Sees aggregated graph and model features.
-- `RED_AGENT`: Sees only tool responses and public directory data.
+- `RED_AGENT`: Deliberately white-box — sees its own accounts in full, *plus every other account on the branch* (real `account_id`/`balance`/`status`/`kyc_level`, owner identity hashed the same way `BANK_OPS` masks it). This is intentional: the point is stress-testing detection coverage across the full attack surface, not modeling a blind external attacker's limited discovery. Visibility ≠ authorization, though — `WorldEngine._execute_transfer()`/`_execute_payment()` separately enforce that only an account's real owner can spend *from* it (`UNAUTHORIZED_SOURCE` otherwise); seeing an account only ever makes it a valid transfer/payment *target*. See `docs/redteam_agent_design.md` §9.
 - `BLUE_AGENT`: Sees security alerts and case data.
 
 #### `DeviceType` & `DeviceStatus`
@@ -178,6 +178,18 @@ Defined in `sim/core/interfaces.py`:
 - `get_state_hash() -> str`: Computes deterministic SHA-256 state hash.
 - `sim_time_ns -> float`: Read-only property returning current simulation nanoseconds.
 
+`WorldEngineImpl` (`sim/core/engine.py`) also has two checkpoint-serialization
+method pairs not in the Protocol above, because they serve different
+consumers with different fidelity needs — **they are not interchangeable**:
+- `get_canonical_state_bytes()` / (no restore counterpart): lossy, hash-only —
+  drops `account_id`/`owner_id`/`created_at_ns`/`linked_device_ids`, fields
+  not needed for `get_state_hash()`'s contract. Used by `api/sim_session.py`'s
+  own in-process live forking, which rebuilds aggregates a different way.
+- `get_full_snapshot_bytes()` / `restore_full_snapshot_bytes()`: full-fidelity
+  pickle round-trip, restorable. Required by `sim/main.py::build_simulation_for_branch()`
+  — a red-team session's warmup checkpoint must be produced with this pair,
+  not the canonical one. See `docs/redteam_agent_design.md`'s Known limitations.
+
 ---
 
 ## 3. Domain Events (`sim/core/events.py`)
@@ -270,6 +282,9 @@ class CalibratedParams:
 - `get_state_hash(branch_id: str, event_number: int) -> str`
 - `delete_branch(branch_id: str) -> None`
 - `reset() -> None`
+- `update_branch_metadata(branch_id: str, metadata: dict[str, object]) -> Branch` — added for the red-team harness's `commit_strategy`/`save_note` tools (tag a branch as a committed strategy, persist target notes), implemented on both `PostgresChronoDAG` and the test-only `InMemoryChronoDAG` fake.
+
+`PostgresChronoDAG` (`sim/chrono/store.py`) also has `import_branch_snapshot(branch_id, event_number, sim_time_ns, state_hash, aggregate_snapshot, rng_state, metadata=None) -> Checkpoint`, not part of the Protocol — registers a brand-new parentless root branch and immediately checkpoints it, used to bridge externally-produced engine state (the demo API's in-memory `SimSession`) into the real store so a demo checkpoint becomes forkable by the red-team harness (`api/main.py`'s `/api/checkpoints/{id}/export-for-redteam`).
 
 ---
 
@@ -283,16 +298,17 @@ Mapping (`ROLE_CAPABILITIES`):
 - `MERCHANT`: `VIEW_OWN_ACCOUNT`, `REFUND_PAYMENT`, `VIEW_TRANSACTIONS`, `ONBOARD_MERCHANT`
 - `BANK_OPS`: `VIEW_ALL_ACCOUNTS`, `FREEZE_ACCOUNT`, `CLOSE_ACCOUNT`, `BLOCK_DEVICE`, `SUSPEND_MERCHANT`, `VIEW_ALL_TRANSACTIONS`, `VIEW_RISK_SCORES`
 - `RISK_ANALYST`: `VIEW_ALL_TRANSACTIONS`, `VIEW_RISK_SCORES`, `VIEW_ALERTS`
-- `RED_AGENT`: `VIEW_OWN_ACCOUNT`, `MAKE_PAYMENT`, `TRANSFER_FUNDS`, `REGISTER_DEVICE`, `VIEW_TRANSACTIONS`, `CREATE_ACCOUNT`
+- `RED_AGENT`: `VIEW_OWN_ACCOUNT`, `VIEW_ALL_ACCOUNTS` (see white-box note above — recorded here for accuracy though `get_world_view()` isn't gateway-mediated, so this isn't yet an enforced check), `MAKE_PAYMENT`, `TRANSFER_FUNDS`, `REGISTER_DEVICE`, `VIEW_TRANSACTIONS`, `CREATE_ACCOUNT`, `FORK_BRANCH`, `REPLAY_BRANCH`, `DIFF_BRANCHES` (rate-limited separately via `ToolSpec.rate_limit_tier="branch_op"`, not free just because they're granted)
 - `BLUE_AGENT`: `VIEW_ALL_ACCOUNTS`, `VIEW_ALL_TRANSACTIONS`, `VIEW_RISK_SCORES`, `VIEW_ALERTS`, `FREEZE_ACCOUNT`, `BLOCK_DEVICE`, `INITIATE_CHARGEBACK`
 
 ### Dataclasses
-- `ToolSpec`: `name`, `description`, `required_capabilities`, `parameter_schema`, `rate_limit_per_step`, `rate_limit_per_day`, `visible_fields`.
+- `ToolSpec`: `name`, `description`, `required_capabilities`, `parameter_schema`, `rate_limit_per_step`, `rate_limit_per_day`, `visible_fields`, `rate_limit_tier` (default `"normal"`; an *additional* tier-wide cap keyed independently of the per-tool limits — see `sim.gateway.policy.TIER_LIMITS`, e.g. `"branch_op"` shares one tighter budget across fork/checkpoint/diff/commit regardless of which specific tool fired).
 - `ActorContext`: `actor_id`, `actor_role`, `capabilities`, `branch_id`, `device_id`, `session_id`.
 - `ToolResult`: `success`, `tool_name`, `data`, `error_code`, `error_message`, `filtered_fields`.
+- `ToolRejection` (exception, not a dataclass): raised by a tool handler to report a *business* rejection (insufficient funds, over a limit, unauthorized source account, ...) — carries its own `error_code`, caught specifically by `ToolGatewayImpl.call_tool()` before the generic exception handler so a real bug (`error_code="INTERNAL_ERROR"`, classified + logged by `sim/gateway/errors.py`) never reads the same as an expected decline.
 
 ### Protocol: `ToolGateway`
-- `register_tool(spec: ToolSpec) -> None`
+- `register_tool(spec: ToolSpec, handler: Callable) -> None` — the `handler` param was missing from this Protocol signature for a while (every real implementation always required it); fixed.
 - `list_tools(context: ActorContext) -> list[ToolSpec]`
 - `call_tool(tool_name: str, parameters: dict[str, object], context: ActorContext) -> ToolResult`
 

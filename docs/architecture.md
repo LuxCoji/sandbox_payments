@@ -21,6 +21,8 @@ As established in `initial_plan.md`, the platform is divided across three parall
 +-------------------------------+-----------------------------+---------------+---------------+
 ```
 
+`agents/redteam/` (an LLM-driven red-team harness against the gateway/ChronoDAG) postdates this original map — it's a consumer of `sim`, not a subsystem in it, same relationship `api/` has. See `docs/redteam_agent_design.md`.
+
 ### Current Status
 
 | Subsystem | Location | Status |
@@ -29,7 +31,7 @@ As established in `initial_plan.md`, the platform is divided across three parall
 | **Core Engine** | `sim/core/engine.py`, `sim/core/*.py` | Implemented — ChronoDAG-wired, all 10 TransactionTypes handled |
 | **Scheduler** | `sim/scheduler/rng.py`, `sim/scheduler/env.py` | Implemented |
 | **Gateway Contracts** | `sim/gateway/interfaces.py` | Defined (Contracts) |
-| **Gateway Implementation** | `sim/gateway/registry.py`, `sim/gateway/policy.py` | Implemented — LangGraph adapter and token-bucket rate limiting still pending |
+| **Gateway Implementation** | `sim/gateway/registry.py`, `sim/gateway/policy.py`, `sim/gateway/adapters.py`, `sim/gateway/errors.py` | Implemented — LangGraph adapter (`LangGraphAdapter.as_tool_node()`) is used by `agents/redteam/harness.py`'s graph orchestration path; rate limiting is still simple per-step/per-day + tier counters, not a token bucket |
 | **Population Contracts** | `sim/population/interfaces.py` | Defined (Contracts) |
 | **Population Implementation** | `sim/population/*.py`, `scripts/calibrate.py` | Implemented |
 | **Chrono Contracts** | `sim/chrono/interfaces.py` | Defined (Contracts) |

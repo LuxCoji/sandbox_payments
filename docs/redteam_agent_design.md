@@ -1,9 +1,11 @@
 # Red-Team Agents — Design Notes
 
-Status: **v1 complete** — all 8 phases of the build sequence (§6) implemented
-and verified, including a real end-to-end session against real providers
-(Groq/Gemini/NVIDIA) and a real Postgres/Supabase database. Builds on
-`sim/gateway`, `sim/chrono`. Companion to `docs/chrono_dag.md` and
+Status: **v1 complete, plus a hardening pass driven by real sessions** — all
+8 phases of the build sequence (§6) implemented and verified, then run for
+real against real providers (Groq/Gemini/NVIDIA) and a real Postgres/Supabase
+database repeatedly, which surfaced and fixed several real bugs (§9) and one
+real architectural gap the agent itself found and demonstrated (§10). Builds
+on `sim/gateway`, `sim/chrono`. Companion to `docs/chrono_dag.md` and
 `docs/interfaces.md` — read those first for the mechanics this uses.
 
 **§1–§4 decisions are locked** (interaction model = lockstep, onset = fork
@@ -286,14 +288,40 @@ demo sim:**
   `GET /api/redteam/sessions/{id}` (detail + full step log), `WS
   /api/redteam/stream/{id}` (live steps; replays already-happened steps to a
   subscriber that connects mid-session, since there's no periodic "tick" to
-  eventually catch up on the way `/api/stream` has).
+  eventually catch up on the way `/api/stream` has). Also
+  `POST /api/checkpoints/{id}/export-for-redteam` (bridges a demo-session
+  checkpoint — which lives only in the in-process `LiveChronoDAG` — into the
+  real Postgres store the harness can actually fork from; see §9) and the
+  `/api/branches` graph endpoint now also merges in real `red-team/*`
+  branches from Postgres alongside the demo ones, so a red-team fork
+  actually shows up as its own lane in the ChronoDAG graph instead of only
+  existing in the DB (clicking it jumps to the Red Team view below and
+  selects that session).
 
-**Frontend**: new `frontend/src/RedTeamPanel.tsx`, wired in as a "Red Team"
-tab alongside the existing Feed/Agents/Checkpoints/Sandbox tabs in
-`App.tsx`. Deliberately extends the app's existing visual system (near-black
-palette, JetBrains Mono/Inter, the same `.feed-item`/`.badge`/`.pill`
-component classes `LiveFeed.tsx` and `SandboxPanel.tsx` already use) rather
-than introducing a second visual language for one panel.
+**Frontend — its own top-level view, not a side-panel tab.** Originally
+shipped as `RedTeamPanel.tsx`, one more tab alongside Feed/Agents/
+Checkpoints/Sandbox — too cramped for what turned out to matter once
+sessions were run for real. Replaced with `frontend/src/RedTeamDashboard.tsx`,
+switched to via a "Simulation / 🔴 Red Team" toggle in the top bar
+(`App.tsx`'s `view` state) that swaps the whole layout, not just the side
+panel. The dashboard shows, per session: a header with copyable session/
+branch IDs and commit status, a step-progress meter (`steps_taken /
+max_steps` — `max_steps` is now threaded through from
+`RedTeamConfig.session_max_steps` into `RedTeamSessionState`, previously
+absent), stat tiles (success rate, ok/failed count, providers used), two
+charts (tool-usage counts, provider-routing avg latency — hand-rolled bar
+components consistent with the app's existing hand-rolled `DagGraph`/
+`Sparkline`, no charting library dependency), and the live step feed. Each
+step now shows the actual `error_message` (not just `error_code` — it
+simply wasn't being sent to the frontend before, see §9), and a failure
+with `error_code == "INTERNAL_ERROR"` renders a visually distinct 🐛
+badge instead of the same "closed/fail" styling a normal business
+rejection gets — the whole point being a human glancing at the feed can
+tell "this is a bug" from "this is the agent's transaction being declined,
+working as intended" without reading the message text. Still extends the
+app's existing visual system (near-black palette, JetBrains Mono/Inter,
+the same `.feed-item`/`.badge`/`.pill`/`.stat-tile` component classes) —
+no second visual language, just more surface area.
 
 **litellm/OTel tracing (`_maybe_register_otel_callback()` in
 `llm_router.py`) is kept, demoted to secondary/optional**, still gated on
@@ -306,6 +334,142 @@ building this: importing `litellm` loads `.env` as a side effect
 (undocumented litellm behavior), which sets that env var in *every* process
 the moment `litellm` is imported, regardless of test intent. All three
 router/harness test fixture files explicitly pass `enable_otel_tracing=False`.
+
+---
+
+## 9. Real bugs found by actually running sessions
+
+v1 "worked" (start a session, get a step feed) but the *first* real
+multi-provider sessions against a real DB surfaced a run of genuine bugs —
+listed here because each one changed what a session's output actually meant,
+not just how it looked. Ordered roughly as found.
+
+- **`create_account` was a pure no-op stub.** `sim/main.py::_register_core_tools`'s
+  handler was `def create_account_handler(context, params, engine): return []`
+  — never called `engine.create_account()`. Every call reported success while
+  creating nothing, so the agent's own account list stayed permanently empty
+  and it just looped `create_account → inspect_account` forever, never
+  reaching `transfer_funds`/`make_payment`. This was the actual reason early
+  sessions "did nothing interesting" — not the step cap (raised 8 → 30
+  alongside the fix, but that was never the real bottleneck).
+- **`inspect_account`/`transfer_funds`/`make_payment` silently reported
+  failure as success.** `inspect_account` returned `[]` (empty-but-successful)
+  when the target account didn't exist instead of erroring.
+  `transfer_funds`/`make_payment` returned `CommandResult.events`
+  unconditionally, ignoring `CommandResult.success` — so a *rejected*
+  transfer (insufficient funds, over a daily limit) was reported to the
+  agent as a success containing a rejection event, the one signal a
+  red-team agent most needs to read correctly. Fixed to check `.success`
+  and raise on failure.
+- **Every failure surfaced as an uninformative `INTERNAL_ERROR`.** Two
+  separate causes: (1) the fix above raised plain `ValueError`s, which the
+  gateway's generic exception handler collapses into `INTERNAL_ERROR`
+  regardless of whether it's a business rejection or a real bug; (2)
+  unguarded parameter parsing — `int(str(params.get("amount_paise")))` with
+  a missing `amount_paise` silently became `int("None")`, a raw crash with
+  no real signal. Fixed with a new `ToolRejection` exception
+  (`sim/gateway/interfaces.py`) carrying a real `error_code`
+  (`LIMIT_EXCEEDED`, `INSUFFICIENT_FUNDS`, `ACCOUNT_NOT_FOUND`,
+  `MISSING_PARAMETER`, `INVALID_PARAMETER`, ...) pulled from the domain
+  event's own `reason_code`/`decline_code`/`detail` fields
+  (`sim/core/events.py` already had this data, it just wasn't surfaced),
+  caught specifically by `ToolGatewayImpl.call_tool()` before the generic
+  handler. Genuine unexpected exceptions now go through the new
+  `sim/gateway/errors.py::internal_error_result()` — logs a full traceback
+  server-side via the project's structured logger (which itself needed a
+  fix: no `format_exc_info` processor in the structlog config, so
+  `exc_info=True` either lost the traceback or risked breaking JSON
+  serialization) and writes an `error_message` explicit that this is a
+  system fault, not a rejection — read by both a human (the 🐛 badge, §8)
+  and the LLM (persona prompt now says explicitly: `INTERNAL_ERROR` isn't a
+  business signal, don't reason about it as a detection threshold, try
+  something else).
+- **`error_message` was never sent to the frontend at all** — `step_entry`
+  in `harness.py` only ever included `error_code`. Combined with the point
+  above, this meant there was no way to tell from the UI whether a failure
+  was an expected rejection or a real bug — the data simply wasn't there.
+  Fixed (§8).
+- **The agent had no memory beyond one step back.** `decide_next_action()`
+  only ever received `last_action_outcome` (singular). A rotating pool of 4
+  different providers sharing no state beyond one line meant the agent
+  would routinely repeat an action it had already tried and failed at
+  several steps ago. Fixed with a bounded rolling `history` (last 12 steps,
+  `agents/redteam/harness.py::_HISTORY_WINDOW`, now naming the actual
+  account(s) involved per line, not just tool name + success) plus a new
+  `save_note` tool (`sim/main.py`) — the agent writes a note naming an
+  account_id and its plan for it, persisted to the branch's own ChronoDAG
+  metadata (same mechanism `commit_strategy` uses — inspectable after the
+  session ends, not just LLM-context-bound) and echoed into every
+  subsequent turn's prompt via `personas.summarize_target_notes()`.
+- **`_get_daily_reset_events()` crashed the live population loop on every
+  day-boundary rollover.** `DailyCountersReset` (like every `DomainEvent`
+  subclass) is `@dataclass(frozen=True)`, but the code tried
+  `reset_event.event_id = self._next_event_id()` — direct mutation of a
+  frozen instance, raising `FrozenInstanceError`. Not red-team-specific
+  (affects the demo `main` branch's background loop too, `api/sim_session.py`),
+  found via a real crash log. Fixed with `dataclasses.replace()`; regression
+  test in `sim/core/tests/test_engine.py` reproduces it by advancing
+  `sim_time_ns` past a day boundary.
+- **Checkpoint export corrupted the idempotency cache's type.**
+  `WorldEngineImpl._processed_idempotency_keys` is a `dict[str, CommandResult]`
+  everywhere in `engine.py` (its own `__init__` annotation was even wrong —
+  `dict[str, None]` — fixed alongside this, and had been silently flagged by
+  mypy the whole time), but `api/sim_session.py`'s own snapshot/restore code
+  (`_snapshot_engine_state`, `build_engine_from_checkpoint`, `fork()`) stored
+  and restored it as a `set` in three places. Latent until the "export for
+  red team" bridge (§8) chained it into a real crash: demo checkpoint →
+  `build_engine_from_checkpoint` (now a `set`) → `get_full_snapshot_bytes()`
+  (pickles the `set` as-is) → `restore_full_snapshot_bytes()` on the real
+  red-team engine → the next `transfer_funds`/`make_payment` call raised
+  `TypeError: 'set' object does not support item assignment` trying to
+  cache its result. Fixed (`dict(...)` in all three spots); regression test
+  in `api/tests/test_sim_session.py` reproduces the full chain and was
+  confirmed to fail pre-fix.
+
+## 10. RED_AGENT's account visibility, and the authorization gap it found
+
+Originally `RED_AGENT` saw only its own accounts, same as `USER`/`MERCHANT`
+(`WorldEngine.get_world_view()`). On explicit request to widen scope — "not
+just merchants, users too, think about what real control-of-payments looks
+like" — this was deliberately expanded: `RED_AGENT` is now **white-box**,
+seeing every account on the branch (other users' *and* merchants'), with
+only the owner's real identity/device IDs masked the same way `BANK_OPS`
+masks them (real `account_id`/`balance`/`status`/`kyc_level` throughout —
+the agent needs those to pick and reason about a target). Framing choice,
+recorded because it's not obviously "realistic": this models a white-box
+security engagement (elevated knowledge, like a real pentest), not a blind
+external attacker's actual discovery process — appropriate for stress-testing
+detection *coverage*, not for measuring what a real fraudster could
+plausibly find on their own. `summarize_world_view()` (`agents/redteam/personas.py`)
+caps the non-owned list at 20 entries so a large population doesn't blow up
+the prompt every turn; own accounts are never capped.
+
+**This surfaced a real, separate authorization gap**: `_execute_transfer()`/
+`_execute_payment()` never checked that `command.actor_id` owned
+`command.source_account_id` — before the visibility widening this was moot
+(no actor with transfer capability ever learned another account's id), but
+once RED_AGENT could see other accounts, nothing stopped it from naming one
+as the *source* and draining it, not just paying into it. A real session
+found and demonstrated exactly this within ~5 steps, then spent the rest of
+a 15-step session repeating the identical move rather than exploring
+anything else — which was itself informative: a missing authorization check
+makes every other, more interesting fraud pattern (structuring, cash-out
+timing, KYC-limit evasion) pointless to try, because the trivial win
+dominates. **Decision: closed the gap**, not left open. `_execute_transfer()`/
+`_execute_payment()` now require `command.actor_id == source_account.owner_id`
+(`reason_code`/`decline_code == "UNAUTHORIZED_SOURCE"` otherwise) — matching
+how a real payments system actually works. Visibility is unaffected: any
+account is still a valid transfer/payment *target* (paying another user or a
+merchant is always allowed), only the *source* is restricted to accounts the
+actor owns. Verified this doesn't affect normal population behavior —
+`PopulationManager._agent_step` always builds commands where `actor_id`
+already equals the source account's owner by construction. The persona
+prompt (`agents/redteam/personas.py`) and tool hints were rewritten to match:
+previously said finding this was "not an exploit to avoid"; now explicitly
+tells the agent the door is closed and not to waste steps probing for a
+bypass, redirecting toward the patterns that are actually the point —
+structuring, cash-out speed, KYC/daily-limit edges, laundering through a
+target account as a payment *destination*.
 
 ---
 
@@ -343,7 +507,13 @@ router/harness test fixture files explicitly pass `enable_otel_tracing=False`.
   shape). This wasn't originally called out in this doc's Phase 3 gap
   description — it was assumed decoding whatever `aggregate_snapshot` already
   contained would be enough; it isn't, because two different producers of
-  that field disagree on its format.
+  that field disagree on its format. The UI's "Use for Red Team" flow
+  (§8/§9) handles this correctly by construction: `api/main.py`'s
+  `/api/checkpoints/{id}/export-for-redteam` always rebuilds the demo
+  checkpoint's engine and calls `get_full_snapshot_bytes()` on it before
+  writing to Postgres — the wrong-serialization mismatch only bites if
+  something bypasses that endpoint and hands a raw demo `checkpoint_id`
+  straight to the harness.
 
 - **`build_simulation_for_branch()` only supports checkpoint-at-head.**
   If the target branch has any events committed after its latest checkpoint
@@ -398,11 +568,18 @@ router/harness test fixture files explicitly pass `enable_otel_tracing=False`.
 
 ## Open questions not resolved here
 
-- **Session length** — how many lockstep steps (actions) does one session run
-  before ending, independent of an early `commit_strategy` call? Affects how
-  stale the agent's view of background traffic gets as the session runs on.
-  `RedTeamConfig.session_max_steps` (default 8) is a first guess, to be tuned
-  from real smoke-test behavior, not validated.
+- **Session length — resolved via real behavior, no longer open.**
+  `RedTeamConfig.session_max_steps` was `8`, a smoke-test-only value nobody
+  revisited. Real sessions showed why that was wrong for a different reason
+  than expected: 8 steps never even got past `create_account`/
+  `inspect_account` setup — but that turned out to be the no-op-handler bug
+  (§9), not a genuinely-too-low cap. Raised to `30` alongside that fix,
+  which is enough for a session to reach and explore actual fund-movement
+  strategies within free-tier rate limits (lockstep = 1 call/step). Whether
+  30 is *still* right now that `UNAUTHORIZED_SOURCE` (§10) closes the
+  trivial win — i.e. whether sessions need more room to find the subtler
+  patterns (structuring, cash-out timing) once the easy exploit is gone —
+  is itself now the open question, not the original number.
 - **Scoring the committed branch** — diffed only against `main`, or also against
   sibling red-team branches from other personas/models, to compare which
   adversary found the sharpest edge?
