@@ -32,7 +32,8 @@ def _fake_run_session_module(monkeypatch: pytest.MonkeyPatch, steps: list[dict[s
 
     def fake_run_session(sim_config, redteam_config, warmup_checkpoint_id=None,  # noqa: ANN001
                           from_genesis=False, session_id=None, router=None,
-                          identity_file=None, on_step: Callable[[dict[str, object]], None] | None = None):
+                          identity_file=None, on_step: Callable[[dict[str, object]], None] | None = None,
+                          pool_from_branch_ids=None):
         for entry in steps:
             if on_step is not None:
                 on_step(entry)

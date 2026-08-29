@@ -36,6 +36,11 @@ export default function RedTeamDashboard({ initialCheckpointId, initialSessionId
   const [fromGenesis, setFromGenesis] = useState(!initialCheckpointId);
   const [checkpointId, setCheckpointId] = useState(initialCheckpointId ?? "");
   const [useGraph, setUseGraph] = useState(false);
+  // Sessions to pool target_notes/commit_reasoning from, in addition to
+  // whichever branch checkpointId itself was forked from — lets several
+  // independent sessions' findings combine into one continuing session
+  // instead of only ever inheriting from direct lineage.
+  const [poolFromIds, setPoolFromIds] = useState<Set<string>>(new Set());
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -107,6 +112,7 @@ export default function RedTeamDashboard({ initialCheckpointId, initialSessionId
     try {
       const { session_id } = await api.startRedteamSession({
         fromGenesis, checkpointId: checkpointId || undefined, useGraph,
+        poolFromBranchIds: [...poolFromIds],
       });
       setActiveId(session_id);
       setSessions((prev) => [
@@ -190,6 +196,33 @@ export default function RedTeamDashboard({ initialCheckpointId, initialSessionId
               <option value="graph">LangGraph StateGraph</option>
             </select>
           </div>
+          {sessions.some((s) => s.status === "done" && s.branch_id) && (
+            <div className="field">
+              <label>pool findings from (optional)</label>
+              <div style={{ maxHeight: 120, overflowY: "auto", display: "flex", flexDirection: "column", gap: 5 }}>
+                {sessions.filter((s) => s.status === "done" && s.branch_id).map((s) => (
+                  <label
+                    key={s.session_id}
+                    style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11, fontFamily: "var(--mono)", color: "var(--text-dim)", cursor: "pointer" }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={poolFromIds.has(s.branch_id!)}
+                      onChange={(e) => {
+                        setPoolFromIds((prev) => {
+                          const next = new Set(prev);
+                          if (e.target.checked) next.add(s.branch_id!);
+                          else next.delete(s.branch_id!);
+                          return next;
+                        });
+                      }}
+                    />
+                    {s.session_id} {s.committed && <span style={{ color: "var(--accent)" }}>✓ committed</span>}
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
           <button
             className="btn primary"
             disabled={starting || (!fromGenesis && !checkpointId)}

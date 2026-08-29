@@ -87,6 +87,7 @@ class RedTeamObserver:
         checkpoint_id: str | None,
         seed: int,
         use_graph: bool,
+        pool_from_branch_ids: list[str] | None = None,
     ) -> str:
         session_id = uuid.uuid4().hex[:8]
         state = RedTeamSessionState(
@@ -110,7 +111,7 @@ class RedTeamObserver:
             loop.call_soon_threadsafe(self._broadcast, session_id, message)
 
         def run() -> None:
-            self._run_session_blocking(state, on_step, seed=seed)
+            self._run_session_blocking(state, on_step, seed=seed, pool_from_branch_ids=pool_from_branch_ids or [])
             done_message: dict[str, object] = {
                 "type": "done", "status": state.status, "committed": state.committed, "error": state.error,
                 "end_checkpoint_id": state.end_checkpoint_id,
@@ -121,7 +122,8 @@ class RedTeamObserver:
         return session_id
 
     def _run_session_blocking(
-        self, state: RedTeamSessionState, on_step: Callable[[dict[str, object]], None], *, seed: int
+        self, state: RedTeamSessionState, on_step: Callable[[dict[str, object]], None], *,
+        seed: int, pool_from_branch_ids: list[str],
     ) -> None:
         # Imported here, not at module top-level: pulls in litellm/langgraph
         # (the `redteam` extra), which the base API install doesn't require.
@@ -144,6 +146,7 @@ class RedTeamObserver:
                 sim_config, redteam_config,
                 warmup_checkpoint_id=state.checkpoint_id, from_genesis=state.from_genesis,
                 session_id=state.session_id, on_step=on_step,
+                pool_from_branch_ids=pool_from_branch_ids,
             )
             state.branch_id = result.branch_id
             state.steps_taken = result.steps_taken

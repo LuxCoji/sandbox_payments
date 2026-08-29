@@ -180,27 +180,38 @@ def _checkpoint_branch_end(
     return str(checkpoint.checkpoint_id)
 
 
-def _seed_notes_from_parent(chrono: PostgresChronoDAG, parent_branch_id: str | None) -> list[str]:
-    """If this session forked from a *previous red-team branch's* checkpoint
-    (session-continuation, as opposed to forking straight from a "main"
-    warmup), carry its findings forward instead of starting blank.
+def _pool_notes_from_branches(chrono: PostgresChronoDAG, branch_ids: list[str]) -> list[str]:
+    """Pool `target_notes` (from save_note) and `commit_reasoning` (from
+    commit_strategy, see _record_commit_reasoning) off any number of other
+    red-team branches — not just the one this session forked from.
 
     Forking from a checkpoint restores engine STATE (account balances
-    exactly as the prior session left them) but not KNOWLEDGE — without
-    this, a "continued" session would have no idea what a prior pass
-    already flagged and would have to rediscover it turn by turn, wasting
-    steps on state the branch's own metadata already recorded. Pools
-    `target_notes` (from save_note) and `commit_reasoning` (from
-    commit_strategy, see _record_commit_reasoning) off the parent branch.
+    exactly as they were) but not KNOWLEDGE — without this, a "continued"
+    session would have no idea what a prior pass already flagged and would
+    rediscover it turn by turn. This generalizes that beyond direct
+    lineage: several independent sessions run off the *same* warmup
+    checkpoint each find something different and commit separately —
+    there was previously no way to start a new session that combines what
+    all of them found, only whichever single branch you happened to fork
+    from. Non-red-team branch_ids (e.g. "main") and unknown/bad ids are
+    silently skipped rather than failing the whole session start — this is
+    best-effort context, not a hard dependency.
     """
-    if parent_branch_id is None or not parent_branch_id.startswith("red-team/"):
-        return []
-    parent_metadata = chrono.checkout(parent_branch_id).branch.metadata
-    parent_notes = parent_metadata.get("target_notes", [])
-    notes = [f"[from {parent_branch_id}] {n}" for n in parent_notes] if isinstance(parent_notes, list) else []
-    commit_reasoning = parent_metadata.get("commit_reasoning")
-    if isinstance(commit_reasoning, str) and commit_reasoning:
-        notes.append(f"[from {parent_branch_id}, prior session's commit_strategy] {commit_reasoning}")
+    notes: list[str] = []
+    for branch_id in branch_ids:
+        if not branch_id or not branch_id.startswith("red-team/"):
+            continue
+        try:
+            metadata = chrono.checkout(branch_id).branch.metadata
+        except Exception:
+            logger.warning("Could not pool notes from branch (skipping)", branch_id=branch_id)
+            continue
+        parent_notes = metadata.get("target_notes", [])
+        if isinstance(parent_notes, list):
+            notes.extend(f"[from {branch_id}] {n}" for n in parent_notes)
+        commit_reasoning = metadata.get("commit_reasoning")
+        if isinstance(commit_reasoning, str) and commit_reasoning:
+            notes.append(f"[from {branch_id}, prior session's commit_strategy] {commit_reasoning}")
     return notes
 
 
@@ -224,6 +235,7 @@ def _prepare_session(
     session_id: str,
     router: Router | None,
     identity_file: Path | None,
+    pool_from_branch_ids: list[str] | None = None,
 ) -> tuple[WorldEngineImpl, ToolGatewayImpl, ActorContext, Router, str, str, PostgresChronoDAG, list[str]]:
     """Shared setup for both run_session() and run_session_via_graph():
     resolve/create the warmup checkpoint, fork the session branch, rebuild
@@ -234,10 +246,11 @@ def _prepare_session(
     commit_strategy's reasoning (see _checkpoint_branch_end/
     _record_commit_reasoning), not just at setup time. Also returns
     `seed_notes` — forking from a checkpoint restores engine STATE, not
-    the prior session's KNOWLEDGE of what it already found; if the fork
-    point is itself a previous red-team session's end checkpoint, this
-    pools that session's target_notes/commit_reasoning so the new one
-    doesn't start blind (see _seed_notes_from_parent).
+    the prior session's KNOWLEDGE of what it already found. The branch
+    actually forked from is always pooled automatically; `pool_from_branch_ids`
+    lets the caller pull in *additional* red-team branches' findings too
+    (e.g. several independent sessions run off the same warmup checkpoint,
+    each finding something different — see _pool_notes_from_branches).
     """
     if from_genesis:
         warmup_checkpoint_id = _warmup_checkpoint(sim_config, redteam_config)
@@ -246,7 +259,8 @@ def _prepare_session(
 
     branch_id, parent_branch_id = _fork_session_branch(sim_config, warmup_checkpoint_id, session_id)
     engine, gateway, chrono = build_simulation_for_branch(sim_config, branch_id)
-    seed_notes = _seed_notes_from_parent(chrono, parent_branch_id)
+    pool_ids = [*([parent_branch_id] if parent_branch_id else []), *(pool_from_branch_ids or [])]
+    seed_notes = _pool_notes_from_branches(chrono, list(dict.fromkeys(pool_ids)))  # de-dupe, keep order
 
     if identity_file is not None:
         ctx = bootstrap_red_agent_context(
@@ -268,6 +282,7 @@ def run_session(
     router: Router | None = None,
     identity_file: Path | None = None,
     on_step: Callable[[dict[str, object]], None] | None = None,
+    pool_from_branch_ids: list[str] | None = None,
 ) -> SessionResult:
     """Run one lockstep red-team session and return its outcome.
 
@@ -282,12 +297,19 @@ def run_session(
     uses to broadcast live steps to the frontend (docs/redteam_agent_design.md
     §8). Optional so run_session() has no observability dependency by default.
 
+    `pool_from_branch_ids`, if given, pulls target_notes/commit_reasoning
+    from any number of other red-team branches into this session's initial
+    notes — not just the one branch it forks from (see
+    _pool_notes_from_branches). Lets several independent sessions' findings
+    get combined into one continuing session.
+
     See also run_session_via_graph() — the LangGraph-orchestrated equivalent
     of this same loop (docs/redteam_agent_design.md §6 Phase 6).
     """
     session_id = session_id or _new_session_id()
     engine, gateway, ctx, router, tools_summary, branch_id, chrono, seed_notes = _prepare_session(
         sim_config, redteam_config, warmup_checkpoint_id, from_genesis, session_id, router, identity_file,
+        pool_from_branch_ids,
     )
 
     result = SessionResult(branch_id=branch_id, session_id=session_id, steps_taken=0, committed=False)
@@ -492,13 +514,16 @@ def run_session_via_graph(
     router: Router | None = None,
     identity_file: Path | None = None,
     on_step: Callable[[dict[str, object]], None] | None = None,
+    pool_from_branch_ids: list[str] | None = None,
 ) -> SessionResult:
     """LangGraph-orchestrated equivalent of run_session() — same setup, same
     step semantics, orchestrated as a StateGraph instead of a Python loop.
+    See run_session()'s docstring for `pool_from_branch_ids`.
     """
     session_id = session_id or _new_session_id()
     engine, gateway, ctx, router, tools_summary, branch_id, chrono, seed_notes = _prepare_session(
         sim_config, redteam_config, warmup_checkpoint_id, from_genesis, session_id, router, identity_file,
+        pool_from_branch_ids,
     )
     graph = build_graph(engine, gateway, ctx, router, redteam_config, tools_summary, chrono, on_step=on_step)
 

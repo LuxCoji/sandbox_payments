@@ -512,14 +512,57 @@ durable.
 **Pooling, not just state restoration**: forking from a checkpoint alone
 only restores engine *state* (account balances exactly as they were) — a
 naively "continued" session would have zero idea what a prior pass already
-found and would waste steps rediscovering it. `_seed_notes_from_parent()`
-closes that: if the checkpoint being forked from lives on another
-`red-team/*` branch (not a `main` warmup), the new session's `notes` list
-is seeded with that branch's `target_notes` and `commit_reasoning` before
-the first turn even runs — the agent's very first world-view prompt already
-says what a previous pass on this lineage concluded. In the UI, a finished
-session with an `end_checkpoint_id` shows a "▶ Continue from here" button
-(`RedTeamDashboard.tsx`) that pre-fills the start form with it.
+found and would waste steps rediscovering it. `_pool_notes_from_branches()`
+closes that: the branch actually forked from is always pooled
+automatically (its `target_notes`/`commit_reasoning` seed the new
+session's `notes` before the first turn even runs), and the caller can
+additionally pass `pool_from_branch_ids` — any number of *other*
+`red-team/*` branches to pool from too. This matters because sessions
+don't only chain linearly: several independent sessions run off the
+*same* warmup checkpoint each find something different and commit
+separately, and there was previously no way to start a new session that
+combines what more than one of them found. Unknown/non-red-team branch
+ids are skipped rather than failing the session start (best-effort
+context, not a hard dependency). In the UI, a finished session with an
+`end_checkpoint_id` shows a "▶ Continue from here" button
+(`RedTeamDashboard.tsx`) that pre-fills the start form with it, and the
+start form itself lists every other *done* session as a checkbox to pool
+from on top of whichever checkpoint you fork from.
+
+---
+
+## 12. Publicly-known limits, given upfront instead of discovered by trial
+
+KYC-tier daily transaction limits are regulatory, public information in a
+real payments system (e.g. RBI's published PPI/wallet KYC limits) — a real
+attacker looks these up, they don't grope for them by repeatedly hitting
+`LIMIT_EXCEEDED`. The persona prompt previously gave the agent no such
+information, so every session burned several early steps rediscovering the
+same constants (`KYC_DAILY_LIMITS`/`ACCOUNT_TYPE_MULTIPLIERS`,
+`sim/core/account.py`) before it could plan around them.
+
+`agents/redteam/personas.py::_public_limits_block()` now builds this
+directly from those two dicts (not hardcoded separately, so the prompt
+can't drift out of sync with what the engine actually enforces) and
+splices it into `REDTEAM_PERSONA_PROMPT`. It surfaces one fact worth
+calling out on its own: `ACCOUNT_TYPE_MULTIPLIERS` gives `CASH_ENTITY`,
+`INTERNAL_SETTLEMENT`, and `ESCROW` accounts a multiplier of `0` —
+**no daily limit at all** — and `create_account`'s `account_type`
+parameter isn't restricted to `PERSONAL`, so the agent can self-provision
+one of these unlimited-cap account types. This is flagged in the prompt
+explicitly rather than left to be found by accident.
+
+**Not yet decided**: whether a real actor should be able to self-provision
+`CASH_ENTITY`/`INTERNAL_SETTLEMENT`/`ESCROW` accounts at all —
+`create_account_handler` (`sim/main.py`) currently accepts any
+`AccountType` from any caller, but a real system would likely reserve
+those account classes for system/operator provisioning, not a normal
+user-facing create-account flow. Population bootstrap never creates
+accounts of these types either (only `PERSONAL`/`MERCHANT`), so today the
+only way one exists is if `RED_AGENT` makes one itself. Left open,
+deliberately, the same way `UNAUTHORIZED_SOURCE` (§10) was closed rather
+than silently left — this is a similar-shaped decision that hasn't been
+made yet.
 
 ---
 

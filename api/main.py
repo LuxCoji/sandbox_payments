@@ -300,6 +300,12 @@ class RedTeamStartRequest(BaseModel):
     checkpoint_id: str | None = None
     seed: int = 42
     use_graph: bool = False
+    # Additional red-team branches whose target_notes/commit_reasoning get
+    # pooled into this session's starting knowledge, on top of whichever
+    # branch checkpoint_id itself was forked from — lets several
+    # independent sessions' findings combine into one continuing session
+    # (docs/redteam_agent_design.md §11).
+    pool_from_branch_ids: list[str] = []
 
 
 @app.post("/api/redteam/sessions")
@@ -308,7 +314,7 @@ async def start_redteam_session(req: RedTeamStartRequest):
         raise HTTPException(400, "Pass checkpoint_id or set from_genesis")
     session_id = await redteam_observer.start_session(
         from_genesis=req.from_genesis, checkpoint_id=req.checkpoint_id,
-        seed=req.seed, use_graph=req.use_graph,
+        seed=req.seed, use_graph=req.use_graph, pool_from_branch_ids=req.pool_from_branch_ids,
     )
     return {"session_id": session_id}
 

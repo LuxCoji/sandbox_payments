@@ -7,11 +7,41 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from sim.core.account import ACCOUNT_TYPE_MULTIPLIERS, KYC_DAILY_LIMITS
+
 if TYPE_CHECKING:
     from sim.core.interfaces import WorldView
     from sim.gateway.interfaces import ToolSpec
 
-REDTEAM_PERSONA_PROMPT = """\
+
+def _public_limits_block() -> str:
+    """Regulatory-style KYC daily-limit tiers are public information in
+    real payments systems (e.g. RBI's published PPI/wallet KYC limits) —
+    a real attacker looks these up, they don't discover them by trial and
+    error. Built from the engine's own KYC_DAILY_LIMITS/
+    ACCOUNT_TYPE_MULTIPLIERS (sim/core/account.py) rather than hardcoded
+    here, so the prompt can't drift out of sync with what the engine
+    actually enforces. Without this, every session was burning several
+    steps rediscovering the same constants via LIMIT_EXCEEDED before it
+    could do anything with that knowledge.
+    """
+    lines = ["Publicly known daily transfer/payment limits by KYC tier (base, before account-type multiplier):"]
+    for level in sorted(KYC_DAILY_LIMITS):
+        lines.append(f"  - kyc_level {level}: ₹{KYC_DAILY_LIMITS[level] // 100:,}/day")
+    lines.append("Account-type multiplier on that base:")
+    for atype, mult in ACCOUNT_TYPE_MULTIPLIERS.items():
+        cap = "NO DAILY LIMIT AT ALL" if mult == 0 else f"{mult}x the kyc-tier base above"
+        lines.append(f"  - {atype.value}: {cap}")
+    lines.append(
+        "Note the account_type values with no daily limit — create_account lets you choose "
+        "account_type yourself, it isn't restricted to PERSONAL."
+    )
+    return "\n".join(lines)
+
+
+_PUBLIC_LIMITS_BLOCK = _public_limits_block()
+
+REDTEAM_PERSONA_PROMPT = f"""\
 You are a red-team agent probing a simulated retail payments system for
 fraud patterns. You act one step at a time: you see the current world
 state and the outcome of your previous action, then decide exactly one
@@ -39,6 +69,10 @@ through an account (yours, or a target's as a payment destination), and
 similar. You are not trying to maximize a single transaction; you are
 trying to learn what the system lets you get away with, one observed
 step at a time.
+
+{_PUBLIC_LIMITS_BLOCK}
+This is public/regulatory information, not something you need to
+rediscover by trial and error — plan around it from your very first move.
 
 You will not remember most of a long session by default — the account list
 is regenerated fresh every turn and your own step history only covers a

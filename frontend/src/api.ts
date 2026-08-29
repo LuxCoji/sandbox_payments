@@ -139,7 +139,9 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ seed, num_users: numUsers, num_merchants: numMerchants }),
     }).then((r) => j<void>(r)),
-  startRedteamSession: (opts: { fromGenesis: boolean; checkpointId?: string; seed?: number; useGraph?: boolean }) =>
+  startRedteamSession: (opts: {
+    fromGenesis: boolean; checkpointId?: string; seed?: number; useGraph?: boolean; poolFromBranchIds?: string[];
+  }) =>
     fetch(`${BASE}/redteam/sessions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -148,6 +150,7 @@ export const api = {
         checkpoint_id: opts.checkpointId ?? null,
         seed: opts.seed ?? 42,
         use_graph: opts.useGraph ?? false,
+        pool_from_branch_ids: opts.poolFromBranchIds ?? [],
       }),
     }).then((r) => j<{ session_id: string }>(r)),
   redteamSessions: () => fetch(`${BASE}/redteam/sessions`).then((r) => j<RedTeamSession[]>(r)),
