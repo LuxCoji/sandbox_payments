@@ -24,6 +24,13 @@ def get_logger(name: str) -> structlog.BoundLogger:
                 structlog.stdlib.add_logger_name,
                 add_trace_id,
                 structlog.processors.TimeStamper(fmt="iso"),
+                # Without this, logger.error(..., exc_info=True)/.exception()
+                # calls pass a raw (exc_type, exc_value, traceback) tuple
+                # through to JSONRenderer, which can't serialize it. This
+                # renders it into a plain "exception" string field first —
+                # needed for sim/gateway/errors.py's internal-error logging
+                # to actually carry a traceback instead of silently losing it.
+                structlog.processors.format_exc_info,
                 structlog.processors.JSONRenderer()
             ],
             logger_factory=structlog.stdlib.LoggerFactory(),

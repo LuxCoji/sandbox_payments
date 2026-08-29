@@ -90,6 +90,14 @@ ROLE_CAPABILITIES: dict[ActorRole, frozenset[Capability]] = {
     }),
     ActorRole.RED_AGENT: frozenset({
         Capability.VIEW_OWN_ACCOUNT,
+        # WorldEngine.get_world_view() now grants RED_AGENT the same
+        # branch-wide (PII-masked) account visibility as BANK_OPS/
+        # RISK_ANALYST/BLUE_AGENT — deliberately white-box, see that
+        # method's docstring. Listed here for documentation accuracy;
+        # get_world_view() is called directly by the harness today, not
+        # gated through ToolGateway.call_tool(), so this isn't yet an
+        # enforced check — it records intent for when/if it is.
+        Capability.VIEW_ALL_ACCOUNTS,
         Capability.MAKE_PAYMENT,
         Capability.TRANSFER_FUNDS,
         Capability.REGISTER_DEVICE,
@@ -144,6 +152,27 @@ class ActorContext:
     branch_id: str                           # Current ChronoDAG branch
     device_id: str | None = None
     session_id: str | None = None
+
+
+class ToolRejection(Exception):
+    """A tool handler raises this to report a *business* rejection — the
+    request was well-formed and reached the domain logic, but the domain
+    logic said no (insufficient funds, over a daily limit, account not
+    found, ...) — as distinct from a genuine bug/crash.
+
+    ToolGatewayImpl.call_tool() catches this specifically (before the
+    generic `except Exception`) and threads `error_code` straight into
+    ToolResult.error_code, instead of every rejection collapsing into the
+    same uninformative "INTERNAL_ERROR" a real crash would also produce.
+    That distinction matters most for a red-team agent: "INTERNAL_ERROR"
+    tells it nothing about which control it just tripped, while
+    "LIMIT_EXCEEDED" or "INSUFFICIENT_FUNDS" is the exact signal it needs to
+    plan its next move.
+    """
+
+    def __init__(self, error_code: str, message: str) -> None:
+        super().__init__(message)
+        self.error_code = error_code
 
 
 @dataclass(frozen=True)

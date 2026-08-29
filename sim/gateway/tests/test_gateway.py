@@ -96,3 +96,27 @@ def test_call_tool_enforces_tier_limit_across_different_tools() -> None:
     result = gateway.call_tool("fork_branch", {}, ctx)
     assert result.success is False
     assert result.error_code == "RATE_LIMITED"
+
+
+def test_call_tool_reports_a_raised_bug_as_internal_error_not_a_rejection() -> None:
+    """A handler that raises something other than ToolRejection is a real
+    bug, not a business decline — call_tool() must route it through
+    sim.gateway.errors.internal_error_result() (see test_errors.py),
+    distinctly from a ToolRejection's error_code/message.
+    """
+    registry = ToolRegistry()
+
+    def buggy_handler(context, params, engine):
+        raise ValueError("unexpected")
+
+    registry.register_tool(ToolSpec("buggy_tool", "test", frozenset(), {}), buggy_handler)
+
+    gateway = ToolGatewayImpl(registry=registry, rate_limiter=RateLimiter(), engine=cast("WorldEngine", _FakeEngine()))
+    ctx = ActorContext(actor_id="agent1", actor_role=ActorRole.RED_AGENT, capabilities=frozenset(), branch_id="main")
+
+    result = gateway.call_tool("buggy_tool", {}, ctx)
+
+    assert result.success is False
+    assert result.error_code == "INTERNAL_ERROR"
+    assert result.error_message is not None
+    assert "bug in the simulation" in result.error_message

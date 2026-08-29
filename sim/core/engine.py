@@ -91,7 +91,11 @@ class WorldEngineImpl:
             fee_schedules=(), rail_limits=(), settlement_cut_off_ns=0.0
         )
 
-        self._processed_idempotency_keys: dict[str, None] = {}
+        # Idempotency cache: execute_command() stores/returns the actual
+        # CommandResult on a repeated idempotency_key, not None — the
+        # annotation was wrong (mypy has been flagging both the return at
+        # line ~180 and the assignment at ~221 all along); fixed here.
+        self._processed_idempotency_keys: dict[str, CommandResult] = {}
         self._tx_counter: int = 0
 
     @property
@@ -109,10 +113,43 @@ class WorldEngineImpl:
         devices = tuple(d.to_snapshot() for d in self._devices.values() if d.owner_id == actor_id)
 
         visible_accounts: list[AccountSnapshot] = []
-        if actor_role in (ActorRole.USER, ActorRole.MERCHANT, ActorRole.RED_AGENT):
+        if actor_role in (ActorRole.USER, ActorRole.MERCHANT):
             for acc in self._accounts.values():
                 if acc.owner_id == actor_id:
                     visible_accounts.append(acc.to_snapshot())
+        elif actor_role == ActorRole.RED_AGENT:
+            # Deliberately white-box (docs/redteam_agent_design.md): a
+            # red-team engagement gets more knowledge than a blind external
+            # attacker would, on purpose — the point is to stress-test
+            # detection coverage across the full attack surface, not to
+            # model how a real fraudster discovers targets. Own accounts
+            # are shown in full (owner_id == actor_id, nothing to mask);
+            # every other account gets the same PII masking as
+            # BANK_OPS/RISK_ANALYST/BLUE_AGENT below — real account_id/
+            # balance/status/kyc (the agent needs those to pick and reason
+            # about a target), pseudonymous owner_id (it doesn't need
+            # anyone's real identity to transact with their account).
+            #
+            # Visibility here is deliberately broader than authorization:
+            # seeing an account's id/balance lets the agent target it as a
+            # transfer_funds/make_payment *destination*, but
+            # _execute_transfer()/_execute_payment() separately enforce
+            # that only an account's real owner can spend from it as the
+            # *source* (reason_code UNAUTHORIZED_SOURCE). That check was
+            # missing for one build of this harness — visibility into
+            # another account's id was, briefly, the only thing standing
+            # between an actor and draining it — and got closed once a
+            # red-team session found and demonstrated exactly that gap.
+            for acc in self._accounts.values():
+                snap = acc.to_snapshot()
+                if acc.owner_id == actor_id:
+                    visible_accounts.append(snap)
+                else:
+                    visible_accounts.append(dataclasses.replace(
+                        snap,
+                        owner_id=self._mask_owner_id(snap.owner_id),
+                        linked_device_ids=tuple(self._mask_owner_id(did) for did in snap.linked_device_ids)
+                    ))
         elif actor_role in (ActorRole.BANK_OPS, ActorRole.RISK_ANALYST, ActorRole.BLUE_AGENT):
             # PII masking: cross-account-visibility roles see every account, but
             # the owner's real ID and device IDs are replaced with stable
@@ -310,10 +347,22 @@ class WorldEngineImpl:
             if acc:
                 reset_event = acc._maybe_reset_daily_counters(self.sim_time_ns, dry_run=False)
                 if reset_event:
-                    reset_event.event_id = self._next_event_id()
-                    reset_event.branch_id = self._branch_id
-                    reset_event.seq_num = self._next_seq_num()
-                    reset_event.actor_id = actor_id
+                    # DomainEvent (and DailyCountersReset) is a frozen
+                    # dataclass — _maybe_reset_daily_counters() returns one
+                    # with placeholder event_id/branch_id/seq_num/actor_id
+                    # (comment there: "Populated by Engine"), but direct
+                    # attribute assignment on a frozen instance raises
+                    # dataclasses.FrozenInstanceError. This was crashing
+                    # the main population loop on every daily-counter
+                    # rollover. dataclasses.replace() is the frozen-safe
+                    # equivalent of the mutation this was trying to do.
+                    reset_event = dataclasses.replace(
+                        reset_event,
+                        event_id=self._next_event_id(),
+                        branch_id=self._branch_id,
+                        seq_num=self._next_seq_num(),
+                        actor_id=actor_id,
+                    )
                     events.append(reset_event)
         return events
 
@@ -429,6 +478,24 @@ class WorldEngineImpl:
         if not src or not dst:
             return events
 
+        # A real payments system never lets you name an arbitrary account
+        # as the source of a transfer — only its owner can spend from it.
+        # This was missing entirely until a red-team session found it
+        # (naming another account as source_account_id silently drained
+        # it, no different from a normal transfer) — see
+        # docs/redteam_agent_design.md and WorldEngine.get_world_view()'s
+        # docstring, both updated once this was closed. Visibility into
+        # other accounts (who you can PAY) is unaffected; this only gates
+        # who can be the SOURCE.
+        if command.actor_id != src.owner_id:
+            events.append(self._create_event(
+                TransferRejected, actor_id=command.actor_id,
+                source_account_id=src.account_id, target_account_id=dst.account_id,
+                amount_paise=command.amount_paise, reason_code="UNAUTHORIZED_SOURCE",
+                detail=f"actor {command.actor_id!r} does not own source account {src.account_id!r}"
+            ))
+            return events
+
         # Validate
         reason = src.can_debit(command.amount_paise)
         if reason:
@@ -482,6 +549,14 @@ class WorldEngineImpl:
             events.append(self._create_event(
                 PaymentDeclined, actor_id=command.actor_id, tx_id=tx_id,
                 reason="Invalid source account", decline_code="INVALID_ACCOUNT"
+            ))
+        elif command.actor_id != src.owner_id:
+            # Same ownership rule as _execute_transfer() above — only the
+            # source account's owner can pay out of it.
+            events.append(self._create_event(
+                PaymentDeclined, actor_id=command.actor_id, tx_id=tx_id,
+                reason=f"actor {command.actor_id!r} does not own source account {src.account_id!r}",
+                decline_code="UNAUTHORIZED_SOURCE"
             ))
         elif src.can_debit(command.amount_paise):
             events.append(self._create_event(

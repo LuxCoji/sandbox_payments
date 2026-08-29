@@ -118,11 +118,13 @@ class DeviceStatus(enum.Enum):
 class AccountSnapshot:
     """Immutable view of an account.
 
-    `owner_id` is the real identity for the owner's own view (actor_role in
-    USER/MERCHANT/RED_AGENT). For roles with cross-account visibility
-    (BANK_OPS/RISK_ANALYST/BLUE_AGENT), WorldEngine.get_world_view() replaces
-    it with a stable pseudonymous hash so no other actor's raw ID leaks
-    through the snapshot — see the PII masking rules on WorldEngine.
+    `owner_id` is the real identity when this is the viewing actor's own
+    account (true for every account a USER/MERCHANT sees, and for a
+    RED_AGENT's own accounts within its otherwise cross-visible view). For
+    every account that ISN'T the viewer's own — the rest of a RED_AGENT's
+    view, and the entire view for BANK_OPS/RISK_ANALYST/BLUE_AGENT —
+    WorldEngine.get_world_view() replaces it with a stable pseudonymous
+    hash so no other actor's raw ID leaks through the snapshot.
     """
     account_id: str                          # UUIDv7
     account_type: AccountType
@@ -190,13 +192,16 @@ class GlobalParams:
 class WorldView:
     """Immutable snapshot of the world as seen by a specific actor.
 
-    Contains ONLY data the actor is authorized to see:
-    - Their own accounts
+    Contains ONLY data the actor is authorized to see. For USER/MERCHANT
+    that's their own accounts only. RED_AGENT and the cross-visibility ops
+    roles (BANK_OPS/RISK_ANALYST/BLUE_AGENT) see every account on the
+    branch, with other actors' owner_id/device ids replaced by a
+    pseudonymous hash — RED_AGENT deliberately white-box (see
+    WorldEngine.get_world_view), the ops roles because investigation needs
+    full visibility. Also always included regardless of role:
     - Public merchant directory (name, category, rating, rail)
-    - Their registered devices
+    - The caller's own registered devices
     - Global parameters (fee schedules, rail limits, cut-off times)
-
-    No other users' data, no graph, no system-wide aggregates.
     """
     actor_id: str
     actor_role: ActorRole

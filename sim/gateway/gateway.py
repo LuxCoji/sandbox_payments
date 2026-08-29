@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sim.gateway.interfaces import ActorContext, ToolResult, ToolSpec
+from sim.gateway.errors import internal_error_result
+from sim.gateway.interfaces import ActorContext, ToolRejection, ToolResult, ToolSpec
 from sim.gateway.policy import RateLimiter, check_capabilities
 from sim.observability import TOOL_CALLS, traced
 
@@ -92,13 +93,17 @@ class ToolGatewayImpl:
                 filtered_fields=removed
             )
 
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).exception("Tool execution failed: %s", tool_name)
+        except ToolRejection as e:
+            # A business rejection, not a bug — see ToolRejection's
+            # docstring. Preserve the handler's actual error_code instead of
+            # falling into the generic INTERNAL_ERROR below.
             return ToolResult(
-                success=False, tool_name=tool_name, error_code="INTERNAL_ERROR",
+                success=False, tool_name=tool_name, error_code=e.error_code,
                 error_message=str(e)
             )
+
+        except Exception as e:
+            return internal_error_result(e, tool_name=tool_name, actor_id=context.actor_id)
 
     def _filter_fields(
         self, data: dict, role: ActorRole, visible: frozenset[str] | None
