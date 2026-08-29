@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING, TypedDict
 
 from agents.redteam.identity import bootstrap_red_agent_context
 from agents.redteam.llm_router import build_router, decide_next_action
-from agents.redteam.personas import REDTEAM_PERSONA_PROMPT, summarize_tools, summarize_world_view
+from agents.redteam.personas import (
+    REDTEAM_PERSONA_PROMPT,
+    summarize_target_notes,
+    summarize_tools,
+    summarize_world_view,
+)
 from sim.chrono.store import PostgresChronoDAG
 from sim.main import build_simulation, build_simulation_for_branch
 from sim.observability import get_logger
@@ -39,6 +44,50 @@ class SessionResult:
     steps_taken: int
     committed: bool
     step_log: list[dict[str, object]] = field(default_factory=list)
+
+
+# How many past steps decide_next_action() gets to see (docs/redteam_agent_design.md
+# — bounded so prompt size/token cost doesn't grow unboundedly over a
+# session_max_steps=30 run; 12 is enough to remember "I already tried this
+# and it failed" without re-explaining the entire session every turn).
+_HISTORY_WINDOW = 12
+
+
+def _history_line(
+    step: int, tool_name: str, parameters: dict[str, object],
+    success: bool, error_code: str | None, error_message: str | None,
+) -> str:
+    # Name the account(s) actually involved — a bare "#5 transfer_funds:
+    # FAILED" gives the agent no way to tell *which* account it was
+    # targeting once that step scrolls out of the (bounded) history
+    # window; this is the cheap complement to save_note (below) for
+    # remembering what it's already tried against a given target.
+    target = ""
+    if tool_name in ("transfer_funds", "make_payment"):
+        src, dst, amt = (
+            parameters.get("source_account_id"), parameters.get("target_account_id"), parameters.get("amount_paise"),
+        )
+        target = f" [{src} -> {dst}, {amt}p]"
+    elif tool_name == "inspect_account":
+        target = f" [{parameters.get('account_id')}]"
+    return (
+        f"#{step} {tool_name}{target}: OK" if success
+        else f"#{step} {tool_name}{target}: FAILED ({error_code}) {error_message}"
+    )
+
+
+def _extract_saved_note(data: dict[str, object]) -> str | None:
+    """Pull the note text back out of a successful save_note ToolResult.data
+    (shaped {"events": [{"note": "..."}]} — see sim/main.py's NoteSaved).
+    Used by both run_session() and build_graph()'s act() node to grow the
+    session's `notes` list the same way.
+    """
+    events = data.get("events")
+    if isinstance(events, list) and events and isinstance(events[0], dict):
+        note = events[0].get("note")
+        if isinstance(note, str) and note:
+            return note
+    return None
 
 
 def _new_session_id() -> str:
@@ -162,14 +211,23 @@ def run_session(
 
     result = SessionResult(branch_id=branch_id, session_id=session_id, steps_taken=0, committed=False)
     last_outcome: str | None = None
+    history: list[str] = []
+    notes: list[str] = []  # from save_note — see summarize_target_notes()
 
     for _step in range(redteam_config.session_max_steps):
         view = engine.get_world_view(ctx.actor_id, ctx.actor_role)
-        world_summary = f"{tools_summary}\n\n{summarize_world_view(view)}"
+        world_summary = f"{tools_summary}\n\n{summarize_world_view(view)}\n\n{summarize_target_notes(notes)}"
 
-        action = decide_next_action(router, redteam_config, world_summary, REDTEAM_PERSONA_PROMPT, last_outcome)
+        action = decide_next_action(
+            router, redteam_config, world_summary, REDTEAM_PERSONA_PROMPT, last_outcome,
+            history=tuple(history[-_HISTORY_WINDOW:]),
+        )
         tool_result = gateway.call_tool(action.tool_name, action.parameters, ctx)
         result.steps_taken += 1
+        if action.tool_name == "save_note" and tool_result.success:
+            note = _extract_saved_note(tool_result.data)
+            if note:
+                notes.append(note)
         step_entry: dict[str, object] = {
             "step": result.steps_taken,
             "tool_name": action.tool_name,
@@ -177,6 +235,13 @@ def run_session(
             "reasoning": action.reasoning,
             "success": tool_result.success,
             "error_code": tool_result.error_code,
+            # Was missing entirely — the UI had error_code ("INTERNAL_ERROR",
+            # "LIMIT_EXCEEDED", ...) but never the actual message, so there
+            # was no way to tell from the step feed whether a failure was an
+            # expected business rejection or a real bug. See
+            # sim/gateway/errors.py for how INTERNAL_ERROR's message is
+            # written to make that distinction obvious on its own.
+            "error_message": tool_result.error_message,
             "provider_model": action.provider_model,
             "latency_ms": action.latency_ms,
         }
@@ -187,6 +252,10 @@ def run_session(
             f"{action.tool_name} succeeded: {tool_result.data}" if tool_result.success
             else f"{action.tool_name} FAILED ({tool_result.error_code}): {tool_result.error_message}"
         )
+        history.append(_history_line(
+            result.steps_taken, action.tool_name, action.parameters, tool_result.success,
+            tool_result.error_code, tool_result.error_message,
+        ))
         logger.info(
             "Session step", session_id=session_id, step=result.steps_taken,
             tool_name=action.tool_name, success=tool_result.success,
@@ -213,6 +282,8 @@ class RedTeamGraphState(TypedDict):
 
     world_summary: str
     last_outcome: str | None
+    history: list[str]
+    notes: list[str]  # from save_note — see personas.summarize_target_notes()
     action: dict[str, object] | None
     tool_result: object | None  # sim.gateway.interfaces.ToolResult at runtime
     steps_taken: int
@@ -244,13 +315,15 @@ def build_graph(
 
     act_node = LangGraphAdapter(gateway).as_tool_node(ctx)
 
-    def observe(_state: RedTeamGraphState) -> dict[str, object]:
+    def observe(state: RedTeamGraphState) -> dict[str, object]:
         view = engine.get_world_view(ctx.actor_id, ctx.actor_role)
-        return {"world_summary": f"{tools_summary}\n\n{summarize_world_view(view)}"}
+        notes_block = summarize_target_notes(state["notes"])
+        return {"world_summary": f"{tools_summary}\n\n{summarize_world_view(view)}\n\n{notes_block}"}
 
     def decide(state: RedTeamGraphState) -> dict[str, object]:
         next_action = decide_next_action(
-            router, redteam_config, state["world_summary"], REDTEAM_PERSONA_PROMPT, state["last_outcome"]
+            router, redteam_config, state["world_summary"], REDTEAM_PERSONA_PROMPT, state["last_outcome"],
+            history=tuple(state["history"][-_HISTORY_WINDOW:]),
         )
         return {
             "action": {
@@ -281,12 +354,26 @@ def build_graph(
                 "reasoning": action.get("reasoning", ""),
                 "success": tool_result.success,
                 "error_code": tool_result.error_code,
+                "error_message": tool_result.error_message,  # was missing — see run_session()'s step_entry
                 "provider_model": action.get("provider_model"),
                 "latency_ms": action.get("latency_ms"),
             })
+        notes = state["notes"]
+        if action["tool_name"] == "save_note" and tool_result.success:
+            note = _extract_saved_note(tool_result.data)
+            if note:
+                notes = [*notes, note]
+
+        action_params = action["parameters"]
+        history_params = action_params if isinstance(action_params, dict) else {}
         return {
             "tool_result": tool_result,
             "last_outcome": outcome,
+            "history": [*state["history"], _history_line(
+                steps_taken, str(action["tool_name"]), history_params, tool_result.success,
+                tool_result.error_code, tool_result.error_message,
+            )],
+            "notes": notes,
             "steps_taken": steps_taken,
             "committed": committed,
         }
@@ -327,7 +414,7 @@ def run_session_via_graph(
     graph = build_graph(engine, gateway, ctx, router, redteam_config, tools_summary, on_step=on_step)
 
     initial_state: RedTeamGraphState = {
-        "world_summary": "", "last_outcome": None, "action": None,
+        "world_summary": "", "last_outcome": None, "history": [], "notes": [], "action": None,
         "tool_result": None, "steps_taken": 0, "committed": False,
     }
     final_state = graph.invoke(initial_state)

@@ -53,10 +53,10 @@ def router_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RedTeamCon
     return RedTeamConfig(providers_file=providers_file, session_max_steps=5, enable_otel_tracing=False)
 
 
-def _make_checkpoint(sim_config: SimConfig) -> Checkpoint:
+def _make_checkpoint(sim_config: SimConfig, owner_id: str = "placeholder-owner") -> Checkpoint:
     engine, _gateway, chrono = build_simulation(sim_config)
     engine.create_account(
-        account_id="acc-1", owner_id="placeholder-owner",
+        account_id="acc-1", owner_id=owner_id,
         account_type=AccountType.PERSONAL, initial_balance_paise=10_000, kyc_level=1,
     )
     checkpoint: Checkpoint = chrono.create_checkpoint(
@@ -70,8 +70,16 @@ def _make_checkpoint(sim_config: SimConfig) -> Checkpoint:
 def test_run_session_stops_on_commit_strategy(
     shared_dag: InMemoryChronoDAG, router_config: RedTeamConfig, tmp_path: Path
 ) -> None:
+    # Pre-seed the actor identity so the checkpoint's account can be owned
+    # by the actual actor_id run_session() will use — inspect_account now
+    # correctly fails on an account the caller doesn't own (previously a
+    # silent no-op "success", the bug this test would otherwise mask).
+    identity_file = tmp_path / ".persona_identity.json"
+    actor_id = "test-red-agent"
+    identity_file.write_text(json.dumps({"actor_id": actor_id}))
+
     sim_config = SimConfig(seed=42, db_url="postgresql://mock:5432")
-    checkpoint = _make_checkpoint(sim_config)
+    checkpoint = _make_checkpoint(sim_config, owner_id=actor_id)
 
     router = build_router(router_config)
     scripted = [
@@ -82,7 +90,7 @@ def test_run_session_stops_on_commit_strategy(
         result = run_session(
             sim_config, router_config, warmup_checkpoint_id=checkpoint.checkpoint_id,
             session_id="test-session", router=router,
-            identity_file=tmp_path / ".persona_identity.json",
+            identity_file=identity_file,
         )
 
     assert result.steps_taken == 2

@@ -136,10 +136,19 @@ def decide_next_action(
     world_view_summary: str,
     persona_prompt: str,
     last_action_outcome: str | None = None,
+    history: tuple[str, ...] = (),
 ) -> NextAction:
-    """One lockstep LLM call: given the current world view and the outcome of
-    the previous action (None on the first turn), decide exactly one next
-    tool call.
+    """One lockstep LLM call: given the current world view, a bounded window
+    of prior-step history, and the outcome of the previous action (None on
+    the first turn), decide exactly one next tool call.
+
+    `history` is a tuple of short one-line step summaries ("#3 create_account:
+    OK", "#4 transfer_funds: FAILED (LIMIT_EXCEEDED) ..."), oldest first,
+    already bounded by the caller (harness.py's _HISTORY_WINDOW) — without
+    it the agent only ever saw the single most recent outcome and had no
+    memory of anything before that, so a rotating pool of 4 different
+    providers with no shared state beyond one line back would routinely
+    repeat an action it had already tried and failed at several steps ago.
 
     On full-pool exhaustion (every deployment rate-limited), block and retry
     with exponential backoff up to retry_backoff_max_s per attempt — per the
@@ -153,12 +162,18 @@ def decide_next_action(
     alongside litellm's own routing/latency spans (see
     _maybe_register_otel_callback), never printed to the terminal.
     """
+    history_block = (
+        "Recent action history, oldest to newest (do not blindly repeat a "
+        "FAILED action — read why it failed):\n" + "\n".join(history)
+        if history else "Recent action history: (none yet — this is early in the session)"
+    )
     messages = [
         {"role": "system", "content": persona_prompt + _RESPONSE_INSTRUCTIONS},
         {
             "role": "user",
             "content": (
                 f"Current world view:\n{world_view_summary}\n\n"
+                f"{history_block}\n\n"
                 f"Outcome of your last action: {last_action_outcome or '(this is your first turn)'}\n\n"
                 "Decide your next single action."
             ),

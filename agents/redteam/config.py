@@ -42,7 +42,16 @@ class RedTeamConfig(BaseSettings):
     # Lockstep: one LLM decision -> one call_tool() per step. This caps how
     # many actions a single session takes before ending (independent of the
     # commit_strategy tool, which can also end a session early).
-    session_max_steps: int = 8
+    #
+    # 8 was a smoke-test-only value from initial harness wiring — in
+    # practice a session spends its first several steps on setup
+    # (create_account/inspect_account) before it has enough of its own
+    # accounts/balances in view to attempt anything resembling structuring
+    # or cash-out, so 8 never left setup. 30 gives real room to get past
+    # setup into actual fund-movement attempts while staying well inside
+    # free-tier rate limits (lockstep = 1 call/step, rotated across the
+    # provider pool).
+    session_max_steps: int = 30
     retry_backoff_base_s: float = 2.0
     retry_backoff_max_s: float = 120.0
 

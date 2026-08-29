@@ -115,12 +115,99 @@ def build_simulation_for_branch(
 def _register_core_tools(registry: ToolRegistry, engine: WorldEngineImpl) -> None:
     import uuid
 
-    from sim.core.interfaces import Command, TransactionType
-    from sim.gateway.interfaces import Capability, ToolSpec
+    from sim.core.interfaces import AccountType, Command, CommandResult, TransactionType
+    from sim.gateway.interfaces import Capability, ToolRejection, ToolSpec
+
+    def _describe_rejection(command_desc: str, result: CommandResult) -> ToolRejection:
+        """Turn a failed CommandResult into a ToolRejection carrying the
+        domain's own reason_code/decline_code — not just a generic
+        INTERNAL_ERROR — so the agent learns exactly which control it
+        tripped (LIMIT_EXCEEDED, INSUFFICIENT_FUNDS, ...) instead of "an
+        error happened, guess why."
+        """
+        if not result.events:
+            # _execute_transfer/_execute_payment return an empty events
+            # list (not a rejection event) when source/target account_id
+            # doesn't resolve to a real account at all — a different
+            # failure mode than a validated-but-declined command.
+            return ToolRejection(
+                "ACCOUNT_NOT_FOUND",
+                f"{command_desc} rejected: source_account_id or target_account_id does not "
+                "resolve to any account on this branch. Double-check the ids from your world view."
+            )
+        codes = []
+        for e in result.events:
+            code = getattr(e, "reason_code", None) or getattr(e, "decline_code", None) or type(e).__name__
+            detail = getattr(e, "detail", None) or getattr(e, "reason", None) or ""
+            codes.append(f"{code}" + (f": {detail}" if detail else ""))
+        return ToolRejection(codes[0].split(":")[0], f"{command_desc} rejected — {'; '.join(codes)}")
+
+    def _optional_int(params: dict[str, object], key: str, default: int) -> int:
+        val = params.get(key, default)
+        try:
+            return int(str(val))
+        except (TypeError, ValueError):
+            raise ToolRejection("INVALID_PARAMETER", f"'{key}' must be an integer, got {val!r}") from None
+
+    def _require_account_id(params: dict[str, object], key: str) -> str:
+        val = params.get(key)
+        if not val:
+            raise ToolRejection("MISSING_PARAMETER", f"'{key}' is required and was not provided")
+        return str(val)
+
+    def _require_amount_paise(params: dict[str, object]) -> int:
+        # This used to be `int(str(params.get("amount_paise")))` — a missing
+        # amount_paise silently became int("None"), a raw ValueError the
+        # gateway's generic exception handler collapses into an
+        # uninformative INTERNAL_ERROR (that's what a red-team agent was
+        # actually hitting: not a rejected transfer, a malformed tool call
+        # it got no real signal about). Validate explicitly instead.
+        val = params.get("amount_paise")
+        if val is None:
+            raise ToolRejection("MISSING_PARAMETER", "'amount_paise' is required and was not provided")
+        try:
+            return int(str(val))
+        except (TypeError, ValueError):
+            raise ToolRejection(
+                "INVALID_PARAMETER", f"'amount_paise' must be an integer (paise), got {val!r}"
+            ) from None
 
     # 1. create_account
+    #
+    # Was a pure no-op stub (`return []`) that never called
+    # engine.create_account() — every call silently did nothing while
+    # reporting success, so a red-team agent would never accumulate any
+    # accounts of its own (get_world_view() filters to owner_id==actor_id,
+    # see sim/core/engine.py::get_world_view) and would just loop
+    # create_account -> inspect_account forever, never reaching
+    # transfer_funds/make_payment. Fixed to genuinely create an account
+    # owned by the calling actor.
+    #
+    # kyc_level=0 (the default here) is deliberately the *lowest* tier —
+    # KYC_DAILY_LIMITS[0] is the tightest daily cap (sim/core/account.py),
+    # i.e. exactly the "exploit KYC/daily-limit edges" surface
+    # REDTEAM_PERSONA_PROMPT asks the agent to probe. initial_balance_paise
+    # defaults to comfortably more than that daily limit so there's
+    # actually room to test structuring across multiple transfers/days.
     def create_account_handler(context, params, engine):
-        return []
+        account_id = str(uuid.uuid4())
+        account_type_str = params.get("account_type", AccountType.PERSONAL.value)
+        try:
+            account_type = AccountType(account_type_str)
+        except ValueError:
+            valid = ", ".join(t.value for t in AccountType)
+            raise ToolRejection(
+                "INVALID_PARAMETER", f"'account_type' {account_type_str!r} is not valid — choose one of: {valid}"
+            ) from None
+        engine.create_account(
+            account_id=account_id,
+            owner_id=context.actor_id,
+            account_type=account_type,
+            initial_balance_paise=_optional_int(params, "initial_balance_paise", 20_00_000),
+            kyc_level=_optional_int(params, "kyc_level", 0),
+        )
+        view = engine.get_world_view(context.actor_id, context.actor_role)
+        return [acc for acc in view.accounts if acc.account_id == account_id]
 
     registry.register_tool(
         ToolSpec("create_account", "Create a new account", frozenset(), {}),
@@ -133,12 +220,23 @@ def _register_core_tools(registry: ToolRegistry, engine: WorldEngineImpl) -> Non
             command_id=str(uuid.uuid4()),
             actor_id=context.actor_id,
             action_type=TransactionType.TRANSFER,
-            source_account_id=str(params.get("source_account_id")),
-            target_account_id=str(params.get("target_account_id")),
-            amount_paise=int(str(params.get("amount_paise"))),
+            source_account_id=_require_account_id(params, "source_account_id"),
+            target_account_id=_require_account_id(params, "target_account_id"),
+            amount_paise=_require_amount_paise(params),
             idempotency_key=str(params.get("idempotency_key", uuid.uuid4()))
         )
-        return engine.execute_command(cmd).events
+        result = engine.execute_command(cmd)
+        if not result.success:
+            # execute_command() never raises on a *business* rejection
+            # (insufficient funds, frozen account, over daily limit, ...) —
+            # it returns CommandResult(success=False, events=(RejectionEvent,)).
+            # The old handler returned `.events` unconditionally, so the
+            # gateway reported EVERY rejected transfer as a success. That's
+            # the one signal a red-team agent most needs to read correctly,
+            # so raise ToolRejection with the domain's own reason_code
+            # instead (see _describe_rejection) — not just "it failed."
+            raise _describe_rejection("Transfer", result)
+        return result.events
 
     registry.register_tool(
         ToolSpec("transfer_funds", "Transfer funds", frozenset({Capability.TRANSFER_FUNDS}), {}),
@@ -151,13 +249,16 @@ def _register_core_tools(registry: ToolRegistry, engine: WorldEngineImpl) -> Non
             command_id=str(uuid.uuid4()),
             actor_id=context.actor_id,
             action_type=TransactionType.PAYMENT,
-            source_account_id=str(params.get("source_account_id")),
-            target_account_id=str(params.get("target_account_id")),
-            amount_paise=int(str(params.get("amount_paise"))),
+            source_account_id=_require_account_id(params, "source_account_id"),
+            target_account_id=_require_account_id(params, "target_account_id"),
+            amount_paise=_require_amount_paise(params),
             idempotency_key=str(params.get("idempotency_key", uuid.uuid4())),
             gateway_hint=str(params.get("gateway_id", ""))
         )
-        return engine.execute_command(cmd).events
+        result = engine.execute_command(cmd)
+        if not result.success:  # same rejection-vs-exception gap as transfer_funds above
+            raise _describe_rejection("Payment", result)
+        return result.events
 
     registry.register_tool(
         ToolSpec("make_payment", "Make a payment", frozenset({Capability.MAKE_PAYMENT}), {}),
@@ -171,7 +272,12 @@ def _register_core_tools(registry: ToolRegistry, engine: WorldEngineImpl) -> Non
         for acc in view.accounts:
             if acc.account_id == acc_id:
                 return [acc]
-        return []
+        # Was falling through to `return []` — an empty-but-successful
+        # ToolResult, indistinguishable from "this account has no
+        # displayable fields" rather than "you don't own an account with
+        # that id". Fail loudly instead so the agent's next decision is
+        # informed by an honest error, not a silent no-op.
+        raise ToolRejection("ACCOUNT_NOT_FOUND", f"No visible account with id {acc_id!r} on this branch")
 
     registry.register_tool(
         ToolSpec("inspect_account", "Inspect account details", frozenset({Capability.VIEW_OWN_ACCOUNT}), {}),
@@ -184,7 +290,9 @@ def _register_redteam_tools(registry: ToolRegistry, engine: WorldEngineImpl, chr
     by build_simulation() (main), only by build_simulation_for_branch().
     See docs/redteam_agent_design.md §3.
     """
-    from sim.gateway.interfaces import Capability, ToolSpec
+    from dataclasses import dataclass
+
+    from sim.gateway.interfaces import Capability, ToolRejection, ToolSpec
 
     def commit_strategy_handler(context, params, engine):
         branch = chrono.checkout(context.branch_id).branch
@@ -201,6 +309,43 @@ def _register_redteam_tools(registry: ToolRegistry, engine: WorldEngineImpl, chr
             rate_limit_tier="branch_op",
         ),
         commit_strategy_handler,
+    )
+
+    @dataclass
+    class NoteSaved:
+        note: str
+
+    def save_note_handler(context, params, engine):
+        # Now that RED_AGENT can see (and target) every account on the
+        # branch, not just its own, it needs somewhere to write down which
+        # ones it's actually building a strategy around — the rolling
+        # step history (agents/redteam/harness.py::_HISTORY_WINDOW) is
+        # short and doesn't name the account involved, so anything beyond
+        # ~12 steps ago is gone unless it's explicitly saved here. Notes
+        # are durably written to the branch's own ChronoDAG metadata (same
+        # mechanism commit_strategy uses) — inspectable after the session
+        # ends, not just held in the LLM's own context — and the harness
+        # also echoes them into every subsequent turn's prompt.
+        note = str(params.get("note", "")).strip()
+        if not note:
+            raise ToolRejection("MISSING_PARAMETER", "'note' is required and must be a non-empty string")
+        branch = chrono.checkout(context.branch_id).branch
+        existing = branch.metadata.get("target_notes", [])
+        notes = [*existing, note] if isinstance(existing, list) else [note]
+        chrono.update_branch_metadata(context.branch_id, {**branch.metadata, "target_notes": notes})
+        return [NoteSaved(note=note)]
+
+    registry.register_tool(
+        ToolSpec(
+            "save_note",
+            "Save a persistent note about a specific account/person you're building a fraud "
+            "strategy around — name the account_id, what you've observed about it, and your "
+            "plan. Notes persist for the rest of this session and are shown to you every turn, "
+            "so use this instead of relying on your own memory across steps.",
+            frozenset(),
+            {},
+        ),
+        save_note_handler,
     )
 
 def _resolve_db_url(args: argparse.Namespace) -> str:
