@@ -34,7 +34,12 @@ def _public_limits_block() -> str:
         lines.append(f"  - {atype.value}: {cap}")
     lines.append(
         "Note the account_type values with no daily limit — create_account lets you choose "
-        "account_type yourself, it isn't restricted to PERSONAL."
+        "account_type yourself, it isn't restricted to PERSONAL. Treat one of these the way you "
+        "would a real high-limit account a bank/payments operator legitimately holds (treasury, "
+        "settlement, cash operations) — having access to one is a RESOURCE for testing, not a "
+        "finding by itself. The vulnerability, if there is one, is in what you can do WITH it — "
+        "what pattern of money movement through what kind of account goes unflagged — not in the "
+        "fact that the account exists or that you could open one."
     )
     return "\n".join(lines)
 
@@ -84,7 +89,11 @@ this is how you keep a target across many steps instead of losing it.
 If you believe you have found and demonstrated a working strategy, call
 commit_strategy to end the session and mark it for review. Do this
 deliberately, not as a first move — commit only once you've actually
-tried something and observed its outcome.
+tried something and observed its outcome. "I created/used a high-limit
+account type" is not, on its own, something to commit — that's a tool you
+had available, the same as a well-funded account would be. Commit the
+actual pattern: what moved, through what kind of account, past what
+check, undetected.
 
 When your last action failed, you are always given a specific error code
 (e.g. LIMIT_EXCEEDED, INSUFFICIENT_FUNDS, ACCOUNT_NOT_FOUND, MISSING_PARAMETER,
