@@ -41,7 +41,9 @@ export default function RedTeamDashboard({ initialCheckpointId, initialSessionId
   // independent sessions' findings combine into one continuing session
   // instead of only ever inheriting from direct lineage.
   const [poolFromIds, setPoolFromIds] = useState<Set<string>>(new Set());
+  const [formHighlighted, setFormHighlighted] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const startFormRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (initialCheckpointId) {
@@ -90,13 +92,26 @@ export default function RedTeamDashboard({ initialCheckpointId, initialSessionId
       const data = JSON.parse(msg.data);
       if (data.type === "step") {
         const step: RedTeamStep = data;
-        setLive((prev) =>
-          prev ? { ...prev, steps_taken: step.step, step_log: [...prev.step_log, step] } : prev
-        );
+        setLive((prev) => {
+          if (!prev) return prev;
+          // The websocket replays a session's ENTIRE step history on every
+          // new connection (api/main.py::redteam_stream, "catch up" for a
+          // subscriber that connects mid- or post-session) — but the
+          // initial `api.redteamSession(activeId)` fetch a few lines above
+          // already loaded that same history via step_log. Without this
+          // check, every step you'd already have gets appended a second
+          // time (same `step` number, same key) — clicking any session
+          // that already had steps showed its whole feed duplicated.
+          if (prev.step_log.some((s) => s.step === step.step)) return prev;
+          return { ...prev, steps_taken: step.step, step_log: [...prev.step_log, step] };
+        });
       } else if (data.type === "done") {
         setLive((prev) =>
           prev
-            ? { ...prev, status: data.status, committed: data.committed, error: data.error, end_checkpoint_id: data.end_checkpoint_id }
+            ? {
+                ...prev, status: data.status, committed: data.committed, error: data.error,
+                end_checkpoint_id: data.end_checkpoint_id, commit_reasoning: data.commit_reasoning,
+              }
             : prev
         );
       }
@@ -119,7 +134,7 @@ export default function RedTeamDashboard({ initialCheckpointId, initialSessionId
         {
           session_id, status: "running", from_genesis: fromGenesis, checkpoint_id: checkpointId || null,
           use_graph: useGraph, branch_id: null, steps_taken: 0, max_steps: 0, committed: false,
-          end_checkpoint_id: null, error: null,
+          end_checkpoint_id: null, commit_reasoning: null, pool_from_branch_ids: [...poolFromIds], error: null,
           started_at: Date.now() / 1000, step_log: [],
         },
         ...prev,
@@ -174,7 +189,11 @@ export default function RedTeamDashboard({ initialCheckpointId, initialSessionId
           one action at a time — what it thinks a fraud system won't catch.
         </div>
 
-        <div className="sandbox-section">
+        <div
+          className="sandbox-section"
+          ref={startFormRef}
+          style={formHighlighted ? { outline: "2px solid var(--violet)", borderRadius: 8, transition: "outline 0.3s" } : undefined}
+        >
           <div className="sandbox-label">Start a session</div>
           <div className="field">
             <label>onset</label>
@@ -281,11 +300,42 @@ export default function RedTeamDashboard({ initialCheckpointId, initialSessionId
                     onClick={() => {
                       setCheckpointId(live.end_checkpoint_id!);
                       setFromGenesis(false);
+                      // This only fills in the start form — it doesn't launch
+                      // anything by itself, and that form lives in the left
+                      // sidebar, a separate scroll area from this step feed,
+                      // so without this the fill-in was invisible and looked
+                      // like the button did nothing.
+                      startFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+                      setFormHighlighted(true);
+                      setTimeout(() => setFormHighlighted(false), 1500);
                     }}
-                    title="Fork a new session from this one's end state — it also inherits this session's save_note/commit_strategy findings, not just the account balances"
+                    title="Fills in the start form with this session's end checkpoint — scroll to it, then click Start session to actually launch the continuation"
                   >
-                    ▶ Continue from here
+                    ▶ Continue from here (fills in the form below)
                   </button>
+                </>
+              )}
+            </div>
+
+            {/* Lineage — where this session actually started from. Was
+                shown nowhere at all before: from_genesis/checkpoint_id and
+                pool_from_branch_ids were fetched but never rendered, so
+                there was no way to tell a fresh session apart from a
+                continuation, or see what it pooled findings from, without
+                reading raw API responses. */}
+            <div className="rt-header" style={{ marginTop: -6, marginBottom: 14 }}>
+              <span style={{ fontSize: 11, color: "var(--text-faint)" }}>
+                {live.from_genesis ? "started: fresh warmup" : "forked from checkpoint"}
+              </span>
+              {!live.from_genesis && live.checkpoint_id && (
+                <CopyChip value={live.checkpoint_id} display={`${shortId(live.checkpoint_id, 13)}…`} />
+              )}
+              {live.pool_from_branch_ids.length > 0 && (
+                <>
+                  <span style={{ fontSize: 11, color: "var(--text-faint)" }}>· pooled findings from</span>
+                  {live.pool_from_branch_ids.map((bid) => (
+                    <CopyChip key={bid} value={bid} display={shortId(bid, 24)} />
+                  ))}
                 </>
               )}
             </div>
@@ -293,6 +343,19 @@ export default function RedTeamDashboard({ initialCheckpointId, initialSessionId
             {live.error && (
               <div className="callout" style={{ borderLeftColor: "var(--danger)", color: "var(--danger)" }}>
                 {live.error}
+              </div>
+            )}
+
+            {/* The actual finding, once committed — was written to Postgres
+                branch metadata (_record_commit_reasoning) but never surfaced
+                in the UI at all before this; the only way to see it was a
+                raw SQL query against the branches table. */}
+            {live.commit_reasoning && (
+              <div className="callout" style={{ borderLeftColor: "var(--accent)", color: "var(--text)" }}>
+                <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--accent)", fontWeight: 700, marginBottom: 4 }}>
+                  📌 Committed finding
+                </div>
+                {live.commit_reasoning}
               </div>
             )}
 

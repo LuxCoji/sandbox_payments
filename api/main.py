@@ -350,9 +350,20 @@ async def redteam_stream(ws: WebSocket, session_id: str):
         for entry in existing.step_log:
             await ws.send_json({"type": "step", **entry})
         if existing.status != "running":
+            # Was missing end_checkpoint_id/commit_reasoning — a client
+            # that reconnects to (or clicks on, well after it finished) an
+            # already-done session got this "done" message immediately,
+            # and its `undefined` fields clobbered whatever the initial
+            # GET /api/redteam/sessions/{id} fetch had correctly populated
+            # (frontend's ws.onmessage spreads this over the previous
+            # state). The "Continue from here" button and the commit
+            # summary would silently disappear for any session you didn't
+            # happen to be watching live when it finished.
             await ws.send_json({
                 "type": "done", "status": existing.status,
                 "committed": existing.committed, "error": existing.error,
+                "end_checkpoint_id": existing.end_checkpoint_id,
+                "commit_reasoning": existing.commit_reasoning,
             })
             return
 

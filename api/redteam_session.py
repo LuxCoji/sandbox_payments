@@ -44,6 +44,17 @@ class RedTeamSessionState:
     # That new session also automatically pools this one's target_notes/
     # commit_reasoning (_seed_notes_from_parent) instead of starting blind.
     end_checkpoint_id: str | None = None
+    # The LLM's own reasoning for its commit_strategy call — the actual
+    # finding, as text. Was being written to Postgres branch metadata
+    # (agents/redteam/harness.py::_record_commit_reasoning) but never
+    # threaded back to any caller, so nothing could display "what did
+    # this session find" without a raw SQL query.
+    commit_reasoning: str | None = None
+    # Other red-team branches this session's opening notes were pooled
+    # from, on top of whichever branch checkpoint_id was itself forked
+    # from (docs/redteam_agent_design.md §11) — recorded here purely for
+    # UI display (lineage), not consulted by the harness itself.
+    pool_from_branch_ids: list[str] = field(default_factory=list)
     error: str | None = None
     started_at: float = field(default_factory=time.time)
     step_log: list[dict[str, object]] = field(default_factory=list)
@@ -93,6 +104,7 @@ class RedTeamObserver:
         state = RedTeamSessionState(
             session_id=session_id, status="running",
             from_genesis=from_genesis, checkpoint_id=checkpoint_id, use_graph=use_graph,
+            pool_from_branch_ids=list(pool_from_branch_ids or []),
         )
         self._sessions[session_id] = state
         self._order.append(session_id)
@@ -114,7 +126,7 @@ class RedTeamObserver:
             self._run_session_blocking(state, on_step, seed=seed, pool_from_branch_ids=pool_from_branch_ids or [])
             done_message: dict[str, object] = {
                 "type": "done", "status": state.status, "committed": state.committed, "error": state.error,
-                "end_checkpoint_id": state.end_checkpoint_id,
+                "end_checkpoint_id": state.end_checkpoint_id, "commit_reasoning": state.commit_reasoning,
             }
             loop.call_soon_threadsafe(self._broadcast, session_id, done_message)
 
@@ -152,6 +164,7 @@ class RedTeamObserver:
             state.steps_taken = result.steps_taken
             state.committed = result.committed
             state.end_checkpoint_id = result.end_checkpoint_id
+            state.commit_reasoning = result.commit_reasoning
             state.status = "done"
         except Exception as exc:  # report to the frontend rather than crash the executor thread
             state.status = "error"

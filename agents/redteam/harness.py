@@ -51,6 +51,12 @@ class SessionResult:
     # pass to --checkpoint. Always created, not just on commit, so a
     # session that hit the step cap without committing is still resumable.
     end_checkpoint_id: str | None = None
+    # The LLM's own reasoning for its commit_strategy call — written to
+    # branch metadata by _record_commit_reasoning() but, before this field
+    # existed, never returned to any caller, so nothing (API or UI) could
+    # actually display "what did this session find" without a raw SQL
+    # query against Postgres.
+    commit_reasoning: str | None = None
 
 
 # How many past steps decide_next_action() gets to see (docs/redteam_agent_design.md
@@ -366,6 +372,7 @@ def run_session(
 
         if action.tool_name == "commit_strategy" and tool_result.success:
             result.committed = True
+            result.commit_reasoning = action.reasoning
             _record_commit_reasoning(chrono, branch_id, action.reasoning)
             break
 
@@ -396,6 +403,7 @@ class RedTeamGraphState(TypedDict):
     tool_result: object | None  # sim.gateway.interfaces.ToolResult at runtime
     steps_taken: int
     committed: bool
+    commit_reasoning: str | None
 
 
 def build_graph(
@@ -454,8 +462,10 @@ def build_graph(
             else f"{action['tool_name']} FAILED ({tool_result.error_code}): {tool_result.error_message}"
         )
         committed = action["tool_name"] == "commit_strategy" and tool_result.success
+        commit_reasoning = state.get("commit_reasoning")
         if committed:
-            _record_commit_reasoning(chrono, ctx.branch_id, str(action.get("reasoning", "")))
+            commit_reasoning = str(action.get("reasoning", ""))
+            _record_commit_reasoning(chrono, ctx.branch_id, commit_reasoning)
         steps_taken = state["steps_taken"] + 1
         if on_step is not None:
             on_step({
@@ -487,6 +497,7 @@ def build_graph(
             "notes": notes,
             "steps_taken": steps_taken,
             "committed": committed,
+            "commit_reasoning": commit_reasoning,
         }
 
     def route_after_act(state: RedTeamGraphState) -> str:
@@ -529,13 +540,14 @@ def run_session_via_graph(
 
     initial_state: RedTeamGraphState = {
         "world_summary": "", "last_outcome": None, "history": [], "notes": list(seed_notes), "action": None,
-        "tool_result": None, "steps_taken": 0, "committed": False,
+        "tool_result": None, "steps_taken": 0, "committed": False, "commit_reasoning": None,
     }
     final_state = graph.invoke(initial_state)
 
     result = SessionResult(
         branch_id=branch_id, session_id=session_id,
         steps_taken=final_state["steps_taken"], committed=final_state["committed"],
+        commit_reasoning=final_state.get("commit_reasoning"),
     )
     result.end_checkpoint_id = _checkpoint_branch_end(
         chrono, engine, branch_id, session_id=session_id, committed=result.committed
