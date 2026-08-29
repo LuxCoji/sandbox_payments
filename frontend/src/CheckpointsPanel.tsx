@@ -75,6 +75,24 @@ export default function CheckpointsPanel({ branch, onForked, onUseForRedTeam }: 
     }
   }
 
+  // Demo checkpoint ids only exist in the in-process demo DAG — the
+  // red-team harness talks to the real Postgres store, so this exact
+  // checkpoint's state has to be materialized there first before handing
+  // the (real) checkpoint_id over.
+  async function useForRedTeam(cp: Checkpoint) {
+    if (!onUseForRedTeam) return;
+    setBusy(true);
+    try {
+      const { checkpoint_id } = await api.exportForRedTeam(cp.checkpoint_id);
+      onUseForRedTeam(checkpoint_id);
+    } catch (e) {
+      console.error("Failed to export for red team:", e);
+      alert(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div>
       <div className="callout">
@@ -119,8 +137,9 @@ export default function CheckpointsPanel({ branch, onForked, onUseForRedTeam }: 
           {onUseForRedTeam && (
             <button
               className="btn small"
+              disabled={busy}
               style={{ width: "100%", marginTop: 6, borderColor: "var(--violet)", color: "var(--violet)" }}
-              onClick={() => onUseForRedTeam(cp.checkpoint_id)}
+              onClick={() => useForRedTeam(cp)}
             >
               🤖 Use for Red Team session →
             </button>

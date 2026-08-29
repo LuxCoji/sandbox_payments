@@ -36,6 +36,7 @@ class RedTeamSessionState:
     use_graph: bool
     branch_id: str | None = None
     steps_taken: int = 0
+    max_steps: int = 0  # filled in once RedTeamConfig is built — 0 until then, not yet known
     committed: bool = False
     error: str | None = None
     started_at: float = field(default_factory=time.time)
@@ -123,7 +124,14 @@ class RedTeamObserver:
 
         try:
             sim_config = SimConfig(seed=seed, num_users=5, num_merchants=1)
-            redteam_config = RedTeamConfig(warmup_hours=0.1, session_max_steps=8)
+            redteam_config = RedTeamConfig(warmup_hours=0.1)  # session_max_steps: RedTeamConfig default
+            # getattr, not dot-access: api/tests/test_redteam_session.py fakes
+            # this module out with `RedTeamConfig=lambda **kw: kw` (a plain
+            # dict, to avoid a real litellm/pydantic dependency in that
+            # test) — dot-access would raise AttributeError here, before
+            # run_fn() ever runs, which starved those tests of every "step"
+            # message and hung them waiting on a queue nothing ever fills.
+            state.max_steps = getattr(redteam_config, "session_max_steps", 0)
             run_fn = run_session_via_graph if state.use_graph else run_session
             result = run_fn(
                 sim_config, redteam_config,

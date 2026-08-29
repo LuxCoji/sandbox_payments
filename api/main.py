@@ -22,6 +22,7 @@ from api.sim_session import SimSession
 
 session: SimSession | None = None
 redteam_observer = RedTeamObserver()
+_redteam_chrono_conn = None  # PostgresChronoDAG | None — lazily opened, reused across polls
 
 
 @asynccontextmanager
@@ -56,7 +57,69 @@ async def health():
 
 @app.get("/api/branches")
 async def list_branches():
-    return _session().list_branch_graph()
+    # The demo simulation and red-team sessions are two separate ChronoDAG
+    # backends (in-memory LiveChronoDAG vs. real Postgres) — merge red-team
+    # branches in here too so a forked red-team session actually shows up
+    # in the graph instead of only existing in the DB. They render as
+    # independent (parentless) lanes: their real Postgres parent is a
+    # synthetic "demo-export/*" bridge branch that has no meaning in this
+    # graph, so surfacing it would just be a dangling connector.
+    branches = _session().list_branch_graph()
+    branches.extend(await asyncio.to_thread(_list_redteam_branches))
+    return branches
+
+
+def _get_redteam_chrono():
+    # Polled every few seconds by the frontend's branch-list refresh —
+    # opening a fresh psycopg connection (plus PostgresChronoDAG's
+    # CREATE-TABLE-IF-NOT-EXISTS setup) on every poll would be wasteful, so
+    # this is cached at module scope and reused, mirroring the `_session()`
+    # global-singleton pattern above.
+    global _redteam_chrono_conn
+    if _redteam_chrono_conn is None:
+        from sim.chrono.store import PostgresChronoDAG
+        from sim.config import SimConfig
+
+        db_url = SimConfig().db_url
+        if not db_url:
+            return None
+        _redteam_chrono_conn = PostgresChronoDAG(db_url)
+    return _redteam_chrono_conn
+
+
+def _list_redteam_branches() -> list[dict]:
+    chrono = _get_redteam_chrono()
+    if chrono is None:
+        return []
+
+    with chrono.conn.cursor() as cur:
+        cur.execute(
+            "SELECT branch_id, head_seq_num, created_at_ns FROM branches "
+            "WHERE branch_id LIKE 'red-team/%' ORDER BY created_at_ns"
+        )
+        rows = cur.fetchall()
+        cur.execute(
+            "SELECT branch_id, event_number FROM checkpoints WHERE branch_id LIKE 'red-team/%'"
+        )
+        checkpoints_by_branch: dict[str, list[int]] = {}
+        for branch_id, event_number in cur.fetchall():
+            checkpoints_by_branch.setdefault(branch_id, []).append(event_number)
+
+    return [
+        {
+            "branch_id": branch_id,
+            "name": f"🔴 {branch_id.removeprefix('red-team/')}",
+            "parent_branch_id": None,
+            "parent_checkpoint_id": None,
+            "fork_seq_num": 0,
+            "head_seq_num": head_seq_num,
+            "live": False,  # forked branches never auto-run — static except for agent actions
+            "seed_offset": 0,
+            "created_at_ns": created_at_ns,
+            "checkpoint_seq_nums": sorted(checkpoints_by_branch.get(branch_id, [])),
+        }
+        for branch_id, head_seq_num, created_at_ns in rows
+    ]
 
 
 @app.get("/api/branches/{branch_id}/state")
@@ -187,6 +250,49 @@ async def delete_branch(branch_id: str):
         raise HTTPException(404, "Unknown branch") from None
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/checkpoints/{checkpoint_id}/export-for-redteam")
+async def export_for_redteam(checkpoint_id: str):
+    """Bridge a demo (in-memory) checkpoint's state into the real Postgres
+    ChronoDAG, returning a checkpoint_id the red-team harness can actually
+    fork from.
+
+    The demo simulation (api/sim_session.py) and red-team sessions
+    (agents/redteam/harness.py) are separate composition roots — demo
+    checkpoints live only in the in-process LiveChronoDAG and were never
+    written to FINSIM_DB_URL, so handing their checkpoint_id straight to the
+    harness's `PostgresChronoDAG.fork()` fails with "Checkpoint not found".
+    This materializes an equivalent checkpoint the harness can see.
+    """
+    try:
+        checkpoint_id = await asyncio.to_thread(_export_checkpoint_to_postgres, checkpoint_id)
+    except KeyError:
+        raise HTTPException(404, "Unknown checkpoint") from None
+    except Exception as e:
+        raise HTTPException(500, f"Failed to export to red-team store: {e}") from e
+    return {"checkpoint_id": checkpoint_id}
+
+
+def _export_checkpoint_to_postgres(checkpoint_id: str) -> str:
+    import uuid
+
+    engine = _session().build_engine_from_checkpoint(checkpoint_id)
+
+    chrono = _get_redteam_chrono()
+    if chrono is None:
+        raise RuntimeError("FINSIM_DB_URL is not set — red-team sessions require it")
+
+    checkpoint = chrono.import_branch_snapshot(
+        branch_id=f"demo-export/{uuid.uuid4().hex[:8]}",
+        event_number=engine._seq_num,
+        sim_time_ns=engine.sim_time_ns,
+        state_hash=engine.get_state_hash(),
+        aggregate_snapshot=engine.get_full_snapshot_bytes(),
+        rng_state=engine._rng.get_state(),
+        metadata={"source": "demo_bridge", "origin_checkpoint": checkpoint_id},
+    )
+    return checkpoint.checkpoint_id
 
 
 class RedTeamStartRequest(BaseModel):

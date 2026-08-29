@@ -215,7 +215,17 @@ class SimSession:
             "gateways": copy.deepcopy(engine._gateways),
             "seq_num": engine._seq_num,
             "tx_counter": engine._tx_counter,
-            "idempotency_keys": set(engine._processed_idempotency_keys),
+            # dict[str, None], not a set — WorldEngineImpl uses it as
+            # `self._processed_idempotency_keys[key] = result`
+            # (execute_command's idempotency cache) — a set doesn't support
+            # item assignment. This snapshot has to preserve that shape
+            # exactly, since a checkpoint built here can now feed back into
+            # a real WorldEngineImpl via the "export for red team" bridge
+            # (api/main.py::_export_checkpoint_to_postgres ->
+            # engine.get_full_snapshot_bytes() -> restore_full_snapshot_bytes()
+            # on the red-team branch), where a wrong type here surfaces as
+            # a genuine TypeError crash three hops away from this line.
+            "idempotency_keys": dict(engine._processed_idempotency_keys),
         }
 
     def create_checkpoint(self, branch_id: str) -> dict:
@@ -255,6 +265,32 @@ class SimSession:
             })
         return out
 
+    def build_engine_from_checkpoint(self, checkpoint_id: str) -> WorldEngineImpl:
+        """Rebuild a standalone engine from a *specific* past checkpoint's
+        stored snapshot — the same reconstruction `fork()` does, but without
+        registering a new demo branch. Used by the "export to red-team
+        store" bridge (api/main.py) so exporting an old checkpoint reflects
+        that checkpoint's state, not whatever the branch has moved on to
+        since.
+        """
+        if checkpoint_id not in self._checkpoint_snapshots:
+            raise KeyError(checkpoint_id)
+        snapshot = self._checkpoint_snapshots[checkpoint_id]
+        cp = self.dag._checkpoints_by_id[checkpoint_id]
+
+        env = SimulationEnv(start_time_ns=int(cp.sim_time_ns))
+        rng = DeterministicRNG.from_seed(self._seed)  # deterministic re-derivation, same caveat as fork()
+        engine = WorldEngineImpl(env=env, rng=rng, branch_id="export-tmp", chrono=None)
+        engine._accounts = copy.deepcopy(snapshot["accounts"])
+        engine._payments = copy.deepcopy(snapshot["payments"])
+        engine._devices = copy.deepcopy(snapshot["devices"])
+        engine._merchants = copy.deepcopy(snapshot["merchants"])
+        engine._gateways = copy.deepcopy(snapshot["gateways"])
+        engine._seq_num = snapshot["seq_num"]
+        engine._tx_counter = snapshot["tx_counter"]
+        engine._processed_idempotency_keys = dict(snapshot["idempotency_keys"])  # see _snapshot_engine_state
+        return engine
+
     # ── forking (real time travel: fork from ANY stored checkpoint) ─
 
     def fork(self, parent_branch_id: str, name: str, checkpoint_id: str | None = None) -> dict:
@@ -283,7 +319,7 @@ class SimSession:
         cloned_engine._gateways = copy.deepcopy(snapshot["gateways"])
         cloned_engine._seq_num = snapshot["seq_num"]
         cloned_engine._tx_counter = snapshot["tx_counter"]
-        cloned_engine._processed_idempotency_keys = set(snapshot["idempotency_keys"])
+        cloned_engine._processed_idempotency_keys = dict(snapshot["idempotency_keys"])  # see _snapshot_engine_state
 
         self.branches[new_branch_id] = BranchHandle(new_branch_id, name, cloned_engine, live=False)
         return self.branch_summary(new_branch_id)

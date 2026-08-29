@@ -5,11 +5,12 @@ import LiveFeed from "./LiveFeed";
 import AccountsPanel from "./AccountsPanel";
 import SandboxPanel from "./SandboxPanel";
 import CheckpointsPanel from "./CheckpointsPanel";
-import RedTeamPanel from "./RedTeamPanel";
+import RedTeamDashboard from "./RedTeamDashboard";
 import Sparkline from "./Sparkline";
 import { formatSimTime, shortId } from "./eventStyle";
 
-type Tab = "feed" | "agents" | "checkpoints" | "sandbox" | "redteam";
+type Tab = "feed" | "agents" | "checkpoints" | "sandbox";
+type View = "sim" | "redteam";
 
 const MAX_FEED = 150;
 const MAX_SPARK = 40;
@@ -24,7 +25,9 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [paused, setPaused] = useState(false);
   const [tab, setTab] = useState<Tab>("feed");
+  const [view, setView] = useState<View>("sim");
   const [redteamPrefillCheckpoint, setRedteamPrefillCheckpoint] = useState<string | null>(null);
+  const [redteamPrefillSessionId, setRedteamPrefillSessionId] = useState<string | null>(null);
   const [moneyHist, setMoneyHist] = useState<number[]>([]);
   const [txHist, setTxHist] = useState<number[]>([]);
   const [eventHist, setEventHist] = useState<number[]>([]);
@@ -134,14 +137,18 @@ export default function App() {
   const shownEvents = events.filter((e) => e.branch_id === selectedBranch);
 
   return (
-    <div className="app">
+    <div className={`app ${view === "redteam" ? "no-statstrip" : ""}`}>
       <div className="topbar">
         <div className="brand">
           <span className="brand-dot" />
           FINSIM <span className="brand-sub">// CHRONO</span>
         </div>
+        <div className="view-switch">
+          <button className={`view-btn ${view === "sim" ? "active" : ""}`} onClick={() => setView("sim")}>Simulation</button>
+          <button className={`view-btn ${view === "redteam" ? "active" : ""}`} onClick={() => setView("redteam")}>🔴 Red Team</button>
+        </div>
         <div className="topbar-spacer" />
-        {branchState && (
+        {view === "sim" && branchState && (
           <>
             <div className="pill">
               <span>clock</span>
@@ -154,10 +161,20 @@ export default function App() {
           <span className={`conn-dot ${connected ? "up" : "down"}`} />
           {connected ? "live" : "reconnecting"}
         </div>
-        <button className="btn small" onClick={togglePause}>{paused ? "▶ resume" : "⏸ pause"}</button>
-        <button className="btn small danger" onClick={handleReset}>⟲ reset</button>
+        {view === "sim" && (
+          <>
+            <button className="btn small" onClick={togglePause}>{paused ? "▶ resume" : "⏸ pause"}</button>
+            <button className="btn small danger" onClick={handleReset}>⟲ reset</button>
+          </>
+        )}
       </div>
 
+      {view === "redteam" ? (
+        <RedTeamDashboard
+          initialCheckpointId={redteamPrefillCheckpoint}
+          initialSessionId={redteamPrefillSessionId}
+        />
+      ) : (
       <div className="main">
         <div className="dag-pane">
           <div className="pane-header">
@@ -169,7 +186,17 @@ export default function App() {
           <DagGraph
             branches={branches}
             selectedBranch={selectedBranch}
-            onSelect={setSelectedBranch}
+            onSelect={(branchId) => {
+              setSelectedBranch(branchId);
+              // Red-team branches live in the real Postgres store, not the
+              // demo SimSession — the Agents/Checkpoints tabs can't show
+              // them (they'd just 404 against the demo backend), so route
+              // straight to the Red Team view and select that session there.
+              if (branchId.startsWith("red-team/")) {
+                setRedteamPrefillSessionId(branchId.slice("red-team/".length));
+                setView("redteam");
+              }
+            }}
             onCheckpointClick={() => setTab("checkpoints")}
           />
         </div>
@@ -180,7 +207,6 @@ export default function App() {
             <div className={`tab ${tab === "agents" ? "active" : ""}`} onClick={() => { setTab("agents"); setSelectedAccount(null); }}>Agents</div>
             <div className={`tab ${tab === "checkpoints" ? "active" : ""}`} onClick={() => setTab("checkpoints")}>Checkpoints</div>
             <div className={`tab ${tab === "sandbox" ? "active" : ""}`} onClick={() => setTab("sandbox")}>Sandbox</div>
-            <div className={`tab ${tab === "redteam" ? "active" : ""}`} onClick={() => setTab("redteam")}>Red Team</div>
           </div>
           <div className="tab-body">
             {tab === "feed" && <LiveFeed events={shownEvents} />}
@@ -201,7 +227,7 @@ export default function App() {
                 }}
                 onUseForRedTeam={(checkpointId) => {
                   setRedteamPrefillCheckpoint(checkpointId);
-                  setTab("redteam");
+                  setView("redteam");
                 }}
               />
             )}
@@ -216,17 +242,19 @@ export default function App() {
                 }}
               />
             )}
-            {tab === "redteam" && <RedTeamPanel initialCheckpointId={redteamPrefillCheckpoint} />}
           </div>
         </div>
       </div>
+      )}
 
+      {view === "sim" && (
       <div className="statstrip">
         <StatTile label="money supply" value={branchState ? "₹" + (branchState.money_supply_paise / 100).toLocaleString("en-IN", { maximumFractionDigits: 0 }) : "—"} data={moneyHist} color="#5ef2b5" />
         <StatTile label="transactions" value={branchState ? branchState.tx_count.toLocaleString() : "—"} data={txHist} color="#6fb7ff" />
         <StatTile label="accounts" value={branchState ? String(branchState.account_count) : "—"} data={[]} color="#b78bff" />
         <StatTile label="events / branch" value={branchState ? `#${branchState.head_seq_num}` : "—"} data={eventHist} color="#ffb454" />
       </div>
+      )}
     </div>
   );
 }

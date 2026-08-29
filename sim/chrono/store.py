@@ -171,6 +171,47 @@ class PostgresChronoDAG(ChronoDAG):
             )
         return checkpoint
 
+    def import_branch_snapshot(
+        self,
+        branch_id: str,
+        event_number: int,
+        sim_time_ns: float,
+        state_hash: str,
+        aggregate_snapshot: bytes,
+        rng_state: bytes,
+        metadata: dict[str, object] | None = None,
+    ) -> Checkpoint:
+        """Register a brand-new, parentless root branch at exactly this state
+        and immediately checkpoint it. Not part of the ChronoDAG protocol —
+        it exists to bridge externally-produced engine state (the in-memory
+        demo `SimSession` in api/sim_session.py, which never touches this
+        store) into the real ChronoDAG so it becomes forkable like any other
+        checkpoint. See api/main.py's `/export-for-redteam` endpoint, the
+        fix for "Use for Red Team" handing the harness a checkpoint_id it
+        has never heard of.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute(
+                '''
+                INSERT INTO branches (
+                    branch_id, parent_branch_id, parent_checkpoint_id,
+                    created_at_ns, seed_offset, head_seq_num, metadata
+                ) VALUES (%s, NULL, NULL, %s, 0, %s, %s)
+                ON CONFLICT (branch_id) DO UPDATE SET head_seq_num = EXCLUDED.head_seq_num
+                ''',
+                (branch_id, int(sim_time_ns), event_number, json.dumps(metadata or {})),
+            )
+        checkpoint: Checkpoint = self.create_checkpoint(
+            branch_id=branch_id,
+            event_number=event_number,
+            sim_time_ns=sim_time_ns,
+            state_hash=state_hash,
+            aggregate_snapshot=aggregate_snapshot,
+            rng_state=rng_state,
+            metadata=metadata,
+        )
+        return checkpoint
+
     def _resolve_lineage(self, branch_id: str) -> list[tuple[str, int, int]]:
         """
         Helper method to resolve the lineage of a branch.

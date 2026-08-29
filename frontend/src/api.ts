@@ -76,6 +76,7 @@ export interface RedTeamStep {
   reasoning: string;
   success: boolean;
   error_code: string | null;
+  error_message: string | null;
   provider_model: string | null;
   latency_ms: number | null;
 }
@@ -88,6 +89,7 @@ export interface RedTeamSession {
   use_graph: boolean;
   branch_id: string | null;
   steps_taken: number;
+  max_steps: number;
   committed: boolean;
   error: string | null;
   started_at: number;
@@ -125,6 +127,11 @@ export const api = {
     }).then((r) => j<BranchState>(r)),
   diff: (a: string, b: string) => fetch(`${BASE}/diff?branch_a=${a}&branch_b=${b}`).then((r) => j<DiffResult>(r)),
   deleteBranch: (id: string) => fetch(`${BASE}/branches/${id}`, { method: "DELETE" }).then((r) => j<void>(r)),
+  // Demo checkpoints live only in the in-process demo DAG, not the real
+  // Postgres store the red-team harness forks from — this materializes an
+  // equivalent checkpoint there and hands back its (real) checkpoint_id.
+  exportForRedTeam: (checkpointId: string) =>
+    fetch(`${BASE}/checkpoints/${checkpointId}/export-for-redteam`, { method: "POST" }).then((r) => j<{ checkpoint_id: string }>(r)),
   resetSimulation: (seed: number = 42, numUsers: number = 60, numMerchants: number = 8) =>
     fetch(`${BASE}/reset`, {
       method: "POST",
