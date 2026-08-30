@@ -162,6 +162,29 @@ def test_decide_next_action_retries_on_rate_limit_then_succeeds(fixture_config: 
     assert mock_completion.call_count == 2
 
 
+def test_decide_next_action_waits_out_whole_pool_cooldown(fixture_config: RedTeamConfig) -> None:
+    """litellm raises RouterRateLimitError ("No deployments available for
+    selected model") when every deployment is in cooldown at once. It
+    subclasses ValueError, NOT litellm.RateLimitError, so it was caught by
+    nothing and propagated straight out of decide_next_action, killing the
+    session — the exact opposite of the block-and-retry behaviour
+    docs/redteam_agent_design.md §7 specifies for pool exhaustion.
+    """
+    from litellm.types.router import RouterRateLimitError
+
+    router = build_router(fixture_config)
+    side_effects = [
+        RouterRateLimitError(
+            model="redteam-agent", cooldown_time=0.01, enable_pre_call_checks=False, cooldown_list=[],
+        ),
+        _fake_response("save_note"),
+    ]
+    with patch.object(router, "completion", side_effect=side_effects) as mock_completion:
+        action = decide_next_action(router, fixture_config, "world view", "persona prompt")
+    assert action.tool_name == "save_note"
+    assert mock_completion.call_count == 2
+
+
 def _fake_response_content(content: str | None) -> SimpleNamespace:
     message = SimpleNamespace(content=content)
     choice = SimpleNamespace(message=message)

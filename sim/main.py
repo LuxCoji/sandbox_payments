@@ -294,21 +294,138 @@ def _register_redteam_tools(registry: ToolRegistry, engine: WorldEngineImpl, chr
 
     from sim.gateway.interfaces import Capability, ToolRejection, ToolSpec
 
+    # How much the agent must actually have DONE before commit_strategy is
+    # allowed to end the session. Real sessions were committing at step
+    # 3-6 of 30 off a single successful transfer, describing it as
+    # "demonstrated laundering ... evaded controls" — the prose bar in the
+    # persona prompt ("commit only once you've actually tried something")
+    # is trivially satisfied by any one success, so it never bound. A
+    # fraud pattern worth committing is multi-step by definition
+    # (structuring, layering, mule routing all mean N movements that
+    # individually look fine), so the floor is enforced here where it
+    # can't be talked around, not just asked for in the prompt.
+    _MIN_VALUE_MOVEMENTS_TO_COMMIT = 3
+
+    def _count_value_movements(context) -> int:
+        """How many times this actor has actually moved value on this branch.
+
+        Counted from the ChronoDAG's own event log, not from anything the
+        agent reports about itself: chrono.checkout() returns every event
+        committed after the branch's latest checkpoint, which for a
+        red-team branch (forked from a checkpoint, not re-checkpointed
+        until session end) is exactly this session's own history.
+        AccountDebited is the signal — both _execute_transfer and
+        _execute_payment emit exactly one per successful movement, and a
+        rejected transfer/payment emits none, so this counts real
+        movements and can't be inflated by failed attempts.
+        """
+        try:
+            pending = chrono.checkout(context.branch_id).pending_events
+        except Exception:
+            return 0
+        return sum(
+            1 for e in pending
+            if e.event_type == "AccountDebited" and e.actor_id == context.actor_id
+        )
+
     def commit_strategy_handler(context, params, engine):
+        pattern = str(params.get("pattern", "")).strip()
+        impact = str(params.get("impact", "")).strip()
+        if not pattern:
+            raise ToolRejection(
+                "MISSING_PARAMETER",
+                "'pattern' is required: name the fraud pattern class you are committing "
+                "(e.g. 'structuring', 'layering through intermediary', 'mule cash-out') "
+                "and the concrete route, not a restatement that a transfer succeeded.",
+            )
+        if not impact:
+            raise ToolRejection(
+                "MISSING_PARAMETER",
+                "'impact' is required: state what a defender should be alarmed by — "
+                "how much value moved, through how many hops/accounts, and which control "
+                "it went around.",
+            )
+        movements = _count_value_movements(context)
+        if movements < _MIN_VALUE_MOVEMENTS_TO_COMMIT:
+            raise ToolRejection(
+                "INSUFFICIENT_EVIDENCE",
+                f"You have only {movements} successful value movement(s) on this branch; "
+                f"{_MIN_VALUE_MOVEMENTS_TO_COMMIT} is the minimum to commit a pattern. A single "
+                "transfer that succeeded is not a fraud pattern — it is one transaction. Build "
+                "the multi-step pattern (more hops, more accounts, or repeated movement under a "
+                "threshold) and commit once you can point at the sequence.",
+            )
         branch = chrono.checkout(context.branch_id).branch
-        chrono.update_branch_metadata(context.branch_id, {**branch.metadata, "origin": "committed"})
+        chrono.update_branch_metadata(context.branch_id, {
+            **branch.metadata,
+            "origin": "committed",
+            "committed_pattern": pattern,
+            "committed_impact": impact,
+            "committed_value_movements": movements,
+        })
         return []
 
     registry.register_tool(
         ToolSpec(
             "commit_strategy",
-            "Tag the current branch as the red-team agent's committed strategy "
-            "(vs. a throwaway exploratory attempt)",
+            "End the session and tag this branch as a committed red-team finding. Requires "
+            "'pattern' (the fraud pattern class + concrete route you demonstrated) and 'impact' "
+            "(value moved, hops, which control it bypassed). Rejected with INSUFFICIENT_EVIDENCE "
+            f"until you have made at least {_MIN_VALUE_MOVEMENTS_TO_COMMIT} successful "
+            "transfers/payments — one successful transaction is not a pattern.",
             frozenset({Capability.FORK_BRANCH}),
             {},
             rate_limit_tier="branch_op",
         ),
         commit_strategy_handler,
+    )
+
+    @dataclass
+    class TimeAdvanced:
+        new_sim_time_ns: int
+        sim_day: int
+
+    def advance_time_handler(context, params, engine):
+        # A forked red-team branch is reconstructed with an EMPTY scheduler
+        # queue (build_simulation_for_branch above) and execute_command()
+        # never touches the clock — so without this tool sim_time_ns is
+        # frozen for the entire session. That silently made a whole class
+        # of the patterns the persona prompt asks for impossible: daily
+        # counters reset lazily on a day boundary (Account.check_daily_limit),
+        # so with a frozen clock every account's daily limit is a one-shot
+        # budget for the session and "structuring across days" / "cash-out
+        # velocity" / any time-dependent pattern cannot be expressed at all.
+        # Safe to expose: env.run(until=...) on an empty queue processes
+        # zero events and just moves _now forward (sim/scheduler/env.py),
+        # so this can't trip the superlinear event-growth issue documented
+        # in CLAUDE.md — that's about scheduling population events, and a
+        # red-team branch has none in flight.
+        hours = params.get("hours")
+        if hours is None:
+            raise ToolRejection("MISSING_PARAMETER", "'hours' is required (number of sim hours to advance)")
+        try:
+            hours_f = float(str(hours))
+        except (TypeError, ValueError):
+            raise ToolRejection("INVALID_PARAMETER", f"'hours' must be a number, got {hours!r}") from None
+        if not 0 < hours_f <= 720:
+            raise ToolRejection(
+                "INVALID_PARAMETER", f"'hours' must be > 0 and <= 720 (30 days), got {hours_f}"
+            )
+        target_ns = int(engine._env.now + hours_f * 3600 * 1e9)
+        engine._env.run(until=target_ns)
+        return [TimeAdvanced(new_sim_time_ns=engine._env.now, sim_day=engine._env.now // 86_400_000_000_000)]
+
+    registry.register_tool(
+        ToolSpec(
+            "advance_time",
+            "Advance the simulation clock by 'hours'. Nothing else moves the clock on this "
+            "branch — it is frozen unless you call this. Crossing a sim-day boundary resets "
+            "every account's daily transaction counters, which is the only way to get a fresh "
+            "daily limit or to express any pattern that depends on timing/velocity.",
+            frozenset(),
+            {},
+        ),
+        advance_time_handler,
     )
 
     @dataclass

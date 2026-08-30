@@ -9,15 +9,12 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypedDict
 
+from agents.redteam.context import SessionMemory, StepRecord, TurnContext
 from agents.redteam.identity import bootstrap_red_agent_context
 from agents.redteam.llm_router import build_router, decide_next_action
-from agents.redteam.personas import (
-    REDTEAM_PERSONA_PROMPT,
-    summarize_target_notes,
-    summarize_tools,
-    summarize_world_view,
-)
+from agents.redteam.personas import REDTEAM_PERSONA_PROMPT, summarize_tools
 from sim.chrono.store import PostgresChronoDAG
+from sim.gateway.interfaces import ToolResult
 from sim.main import build_simulation, build_simulation_for_branch
 from sim.observability import get_logger
 
@@ -59,36 +56,6 @@ class SessionResult:
     commit_reasoning: str | None = None
 
 
-# How many past steps decide_next_action() gets to see (docs/redteam_agent_design.md
-# — bounded so prompt size/token cost doesn't grow unboundedly over a
-# session_max_steps=30 run; 12 is enough to remember "I already tried this
-# and it failed" without re-explaining the entire session every turn).
-_HISTORY_WINDOW = 12
-
-
-def _history_line(
-    step: int, tool_name: str, parameters: dict[str, object],
-    success: bool, error_code: str | None, error_message: str | None,
-) -> str:
-    # Name the account(s) actually involved — a bare "#5 transfer_funds:
-    # FAILED" gives the agent no way to tell *which* account it was
-    # targeting once that step scrolls out of the (bounded) history
-    # window; this is the cheap complement to save_note (below) for
-    # remembering what it's already tried against a given target.
-    target = ""
-    if tool_name in ("transfer_funds", "make_payment"):
-        src, dst, amt = (
-            parameters.get("source_account_id"), parameters.get("target_account_id"), parameters.get("amount_paise"),
-        )
-        target = f" [{src} -> {dst}, {amt}p]"
-    elif tool_name == "inspect_account":
-        target = f" [{parameters.get('account_id')}]"
-    return (
-        f"#{step} {tool_name}{target}: OK" if success
-        else f"#{step} {tool_name}{target}: FAILED ({error_code}) {error_message}"
-    )
-
-
 def _extract_saved_note(data: dict[str, object]) -> str | None:
     """Pull the note text back out of a successful save_note ToolResult.data
     (shaped {"events": [{"note": "..."}]} — see sim/main.py's NoteSaved).
@@ -105,6 +72,46 @@ def _extract_saved_note(data: dict[str, object]) -> str | None:
 
 def _new_session_id() -> str:
     return uuid.uuid4().hex[:8]
+
+
+def _too_early_to_commit(
+    tool_name: str, step: int, redteam_config: RedTeamConfig
+) -> ToolResult | None:
+    """Session-pacing gate on commit_strategy — returns a rejection to use
+    instead of dispatching, or None to proceed normally.
+
+    Sessions were committing at step 6-10 of 30, the moment the
+    movement-count floor in commit_strategy_handler was satisfied, and
+    saying so in their own reasoning ("reaching the 3-transaction
+    threshold required for a valid pattern"). Any countable threshold
+    becomes the objective, so this gate is deliberately not countable:
+    the only way past it is to have actually spent the budget.
+
+    Enforced in the harness rather than the tool handler because it is
+    session policy — it depends on the step budget, which is the session
+    runner's concept, not the branch's. The evidence floor stays in the
+    handler where it belongs (it protects the branch's committed metadata
+    from being written without support). Refusing before dispatch also
+    means a call we intend to reject never tags the branch on its way.
+    """
+    if tool_name != "commit_strategy":
+        return None
+    max_steps = redteam_config.session_max_steps
+    min_step = int(max_steps * redteam_config.min_commit_step_fraction)
+    if step > min_step:
+        return None
+    return ToolResult(
+        success=False,
+        tool_name=tool_name,
+        error_code="TOO_EARLY_TO_COMMIT",
+        error_message=(
+            f"You are on step {step} of {max_steps} — most of your budget is unspent. "
+            f"Findings committed this early have consistently been shallow restatements of "
+            f"'I moved money and it worked'. Keep working: deepen the pattern, quantify it "
+            f"with a total/ratio/rate, or demonstrate a second pattern class. "
+            f"commit_strategy becomes available from step {min_step + 1} onward."
+        ),
+    )
 
 
 def _warmup_checkpoint(sim_config: SimConfig, redteam_config: RedTeamConfig) -> str:
@@ -186,7 +193,7 @@ def _checkpoint_branch_end(
     return str(checkpoint.checkpoint_id)
 
 
-def _pool_notes_from_branches(chrono: PostgresChronoDAG, branch_ids: list[str]) -> list[str]:
+def _pool_notes_from_branches(chrono: PostgresChronoDAG, branch_ids: list[str]) -> tuple[list[str], list[str]]:
     """Pool `target_notes` (from save_note) and `commit_reasoning` (from
     commit_strategy, see _record_commit_reasoning) off any number of other
     red-team branches — not just the one this session forked from.
@@ -202,8 +209,18 @@ def _pool_notes_from_branches(chrono: PostgresChronoDAG, branch_ids: list[str]) 
     from. Non-red-team branch_ids (e.g. "main") and unknown/bad ids are
     silently skipped rather than failing the whole session start — this is
     best-effort context, not a hard dependency.
+
+    Returns (notes, committed_patterns). `committed_patterns` is the new
+    half: commit_strategy has written `committed_pattern` (the pattern
+    CLASS the session claimed) to branch metadata since it became a
+    structured call, but nothing ever read it back, so the only
+    cross-session memory was free-text notes. That is why three
+    consecutive sessions each independently landed on "multi-hop
+    layering" and committed it as new — the field naming what had
+    already been found was never shown to the session that came next.
     """
     notes: list[str] = []
+    patterns: list[str] = []
     for branch_id in branch_ids:
         if not branch_id or not branch_id.startswith("red-team/"):
             continue
@@ -218,7 +235,12 @@ def _pool_notes_from_branches(chrono: PostgresChronoDAG, branch_ids: list[str]) 
         commit_reasoning = metadata.get("commit_reasoning")
         if isinstance(commit_reasoning, str) and commit_reasoning:
             notes.append(f"[from {branch_id}, prior session's commit_strategy] {commit_reasoning}")
-    return notes
+        committed_pattern = metadata.get("committed_pattern")
+        if isinstance(committed_pattern, str) and committed_pattern:
+            impact = metadata.get("committed_impact")
+            suffix = f" (claimed impact: {impact})" if isinstance(impact, str) and impact else ""
+            patterns.append(f"[{branch_id}] {committed_pattern}{suffix}")
+    return notes, patterns
 
 
 def _fork_session_branch(sim_config: SimConfig, checkpoint_id: str, session_id: str) -> tuple[str, str | None]:
@@ -242,7 +264,7 @@ def _prepare_session(
     router: Router | None,
     identity_file: Path | None,
     pool_from_branch_ids: list[str] | None = None,
-) -> tuple[WorldEngineImpl, ToolGatewayImpl, ActorContext, Router, str, str, PostgresChronoDAG, list[str]]:
+) -> tuple[WorldEngineImpl, ToolGatewayImpl, ActorContext, Router, str, str, PostgresChronoDAG, SessionMemory]:
     """Shared setup for both run_session() and run_session_via_graph():
     resolve/create the warmup checkpoint, fork the session branch, rebuild
     the engine on it, and bootstrap the agent's identity + LLM router.
@@ -250,13 +272,14 @@ def _prepare_session(
     Returns `chrono` too (previously discarded as `_chrono`) — both
     callers need it at session end to checkpoint the branch and record
     commit_strategy's reasoning (see _checkpoint_branch_end/
-    _record_commit_reasoning), not just at setup time. Also returns
-    `seed_notes` — forking from a checkpoint restores engine STATE, not
-    the prior session's KNOWLEDGE of what it already found. The branch
-    actually forked from is always pooled automatically; `pool_from_branch_ids`
-    lets the caller pull in *additional* red-team branches' findings too
-    (e.g. several independent sessions run off the same warmup checkpoint,
-    each finding something different — see _pool_notes_from_branches).
+    _record_commit_reasoning), not just at setup time. Also returns a
+    seeded `SessionMemory`: forking from a checkpoint restores engine
+    STATE, not the prior session's KNOWLEDGE of what it already found.
+    The branch actually forked from is always pooled automatically;
+    `pool_from_branch_ids` lets the caller pull in *additional* red-team
+    branches' findings too (e.g. several independent sessions run off the
+    same warmup checkpoint, each finding something different — see
+    _pool_notes_from_branches).
     """
     if from_genesis:
         warmup_checkpoint_id = _warmup_checkpoint(sim_config, redteam_config)
@@ -266,7 +289,9 @@ def _prepare_session(
     branch_id, parent_branch_id = _fork_session_branch(sim_config, warmup_checkpoint_id, session_id)
     engine, gateway, chrono = build_simulation_for_branch(sim_config, branch_id)
     pool_ids = [*([parent_branch_id] if parent_branch_id else []), *(pool_from_branch_ids or [])]
-    seed_notes = _pool_notes_from_branches(chrono, list(dict.fromkeys(pool_ids)))  # de-dupe, keep order
+    # de-dupe, keep order
+    seed_notes, prior_patterns = _pool_notes_from_branches(chrono, list(dict.fromkeys(pool_ids)))
+    memory = SessionMemory(notes=seed_notes, prior_patterns=prior_patterns)
 
     if identity_file is not None:
         ctx = bootstrap_red_agent_context(
@@ -276,7 +301,7 @@ def _prepare_session(
         ctx = bootstrap_red_agent_context(branch_id=branch_id, session_id=session_id)
     router = router or build_router(redteam_config)
     tools_summary = summarize_tools(gateway.list_tools(ctx))
-    return engine, gateway, ctx, router, tools_summary, branch_id, chrono, seed_notes
+    return engine, gateway, ctx, router, tools_summary, branch_id, chrono, memory
 
 
 def run_session(
@@ -313,30 +338,51 @@ def run_session(
     of this same loop (docs/redteam_agent_design.md §6 Phase 6).
     """
     session_id = session_id or _new_session_id()
-    engine, gateway, ctx, router, tools_summary, branch_id, chrono, seed_notes = _prepare_session(
+    engine, gateway, ctx, router, tools_summary, branch_id, chrono, memory = _prepare_session(
         sim_config, redteam_config, warmup_checkpoint_id, from_genesis, session_id, router, identity_file,
         pool_from_branch_ids,
     )
 
     result = SessionResult(branch_id=branch_id, session_id=session_id, steps_taken=0, committed=False)
     last_outcome: str | None = None
-    history: list[str] = []
-    notes: list[str] = list(seed_notes)  # own save_note calls + anything pooled from a parent session
 
     for _step in range(redteam_config.session_max_steps):
         view = engine.get_world_view(ctx.actor_id, ctx.actor_role)
-        world_summary = f"{tools_summary}\n\n{summarize_world_view(view)}\n\n{summarize_target_notes(notes)}"
-
-        action = decide_next_action(
-            router, redteam_config, world_summary, REDTEAM_PERSONA_PROMPT, last_outcome,
-            history=tuple(history[-_HISTORY_WINDOW:]),
+        turn = TurnContext(
+            step=result.steps_taken + 1,
+            max_steps=redteam_config.session_max_steps,
+            view=view,
+            tools_block=tools_summary,
+            memory=memory,
+            last_outcome=last_outcome,
         )
-        tool_result = gateway.call_tool(action.tool_name, action.parameters, ctx)
+
+        try:
+            action = decide_next_action(router, redteam_config, turn.render(), REDTEAM_PERSONA_PROMPT)
+        except Exception:
+            # End the session cleanly instead of propagating. Sessions are
+            # expensive — minutes of wall time against rate-limited free
+            # tiers — and the end-of-session checkpoint (which is what
+            # makes the work resumable and poolable at all) only runs
+            # after this loop exits. Letting one unrecoverable turn throw
+            # discarded every step already taken. decide_next_action
+            # already blocks-and-retries everything genuinely transient
+            # (whole-pool cooldown, per-provider 429, connection errors,
+            # unparseable responses), so reaching here means something
+            # that retrying will not fix — stop, but keep the work.
+            logger.exception(
+                "Unrecoverable error deciding next action — ending session early",
+                session_id=session_id, step=result.steps_taken + 1,
+            )
+            break
+        tool_result = _too_early_to_commit(
+            action.tool_name, result.steps_taken + 1, redteam_config
+        ) or gateway.call_tool(action.tool_name, action.parameters, ctx)
         result.steps_taken += 1
         if action.tool_name == "save_note" and tool_result.success:
             note = _extract_saved_note(tool_result.data)
             if note:
-                notes.append(note)
+                memory.notes.append(note)
         step_entry: dict[str, object] = {
             "step": result.steps_taken,
             "tool_name": action.tool_name,
@@ -361,9 +407,10 @@ def run_session(
             f"{action.tool_name} succeeded: {tool_result.data}" if tool_result.success
             else f"{action.tool_name} FAILED ({tool_result.error_code}): {tool_result.error_message}"
         )
-        history.append(_history_line(
-            result.steps_taken, action.tool_name, action.parameters, tool_result.success,
-            tool_result.error_code, tool_result.error_message,
+        memory.record(StepRecord(
+            step=result.steps_taken, tool_name=action.tool_name, parameters=action.parameters,
+            reasoning=action.reasoning, success=tool_result.success,
+            error_code=tool_result.error_code, error_message=tool_result.error_message,
         ))
         logger.info(
             "Session step", session_id=session_id, step=result.steps_taken,
@@ -393,12 +440,20 @@ class RedTeamGraphState(TypedDict):
     sim/gateway/adapters.py's LangGraphAdapter — which must not import
     anything from agents/, see that module's docstring — can consume
     `state["action"]` without a cross-boundary import.
+
+
+    Session memory (notes, step records, the evidence ledger) is NOT held
+    here — it lives in a SessionMemory owned by build_graph()'s closure.
+    It used to be threaded through this state as two parallel `history`/
+    `notes` lists, which meant the graph path and the plain-loop path each
+    maintained their own copy of the same bookkeeping and had to be kept
+    in sync by hand; they had already drifted (the graph path never
+    recorded reasoning). The graph is built fresh per session and invoked
+    once, so a closure-held SessionMemory is equivalent and single-source.
     """
 
-    world_summary: str
+    user_message: str
     last_outcome: str | None
-    history: list[str]
-    notes: list[str]  # from save_note — see personas.summarize_target_notes()
     action: dict[str, object] | None
     tool_result: object | None  # sim.gateway.interfaces.ToolResult at runtime
     steps_taken: int
@@ -414,6 +469,7 @@ def build_graph(
     redteam_config: RedTeamConfig,
     tools_summary: str,
     chrono: PostgresChronoDAG,
+    memory: SessionMemory,
     on_step: Callable[[dict[str, object]], None] | None = None,
 ) -> CompiledStateGraph:
     """LangGraph-orchestrated version of run_session()'s loop: observe ->
@@ -434,13 +490,19 @@ def build_graph(
 
     def observe(state: RedTeamGraphState) -> dict[str, object]:
         view = engine.get_world_view(ctx.actor_id, ctx.actor_role)
-        notes_block = summarize_target_notes(state["notes"])
-        return {"world_summary": f"{tools_summary}\n\n{summarize_world_view(view)}\n\n{notes_block}"}
+        turn = TurnContext(
+            step=state["steps_taken"] + 1,
+            max_steps=redteam_config.session_max_steps,
+            view=view,
+            tools_block=tools_summary,
+            memory=memory,
+            last_outcome=state["last_outcome"],
+        )
+        return {"user_message": turn.render()}
 
     def decide(state: RedTeamGraphState) -> dict[str, object]:
         next_action = decide_next_action(
-            router, redteam_config, state["world_summary"], REDTEAM_PERSONA_PROMPT, state["last_outcome"],
-            history=tuple(state["history"][-_HISTORY_WINDOW:]),
+            router, redteam_config, state["user_message"], REDTEAM_PERSONA_PROMPT
         )
         return {
             "action": {
@@ -453,10 +515,17 @@ def build_graph(
         }
 
     def act(state: RedTeamGraphState) -> dict[str, object]:
-        act_result = act_node(state)
-        tool_result = act_result["tool_result"]
         action = state["action"]
         assert action is not None
+        # Same session-pacing gate the plain loop applies (see
+        # _too_early_to_commit) — a premature commit_strategy is refused
+        # without reaching the gateway, so it never tags the branch.
+        # Applied here rather than inside act_node because
+        # LangGraphAdapter lives in sim/gateway and must not know about
+        # the harness's step budget.
+        tool_result = _too_early_to_commit(
+            str(action["tool_name"]), state["steps_taken"] + 1, redteam_config
+        ) or act_node(state)["tool_result"]
         outcome = (
             f"{action['tool_name']} succeeded: {tool_result.data}" if tool_result.success
             else f"{action['tool_name']} FAILED ({tool_result.error_code}): {tool_result.error_message}"
@@ -479,22 +548,24 @@ def build_graph(
                 "provider_model": action.get("provider_model"),
                 "latency_ms": action.get("latency_ms"),
             })
-        notes = state["notes"]
         if action["tool_name"] == "save_note" and tool_result.success:
             note = _extract_saved_note(tool_result.data)
             if note:
-                notes = [*notes, note]
+                memory.notes.append(note)
 
         action_params = action["parameters"]
-        history_params = action_params if isinstance(action_params, dict) else {}
+        memory.record(StepRecord(
+            step=steps_taken,
+            tool_name=str(action["tool_name"]),
+            parameters=action_params if isinstance(action_params, dict) else {},
+            reasoning=str(action.get("reasoning", "")),
+            success=tool_result.success,
+            error_code=tool_result.error_code,
+            error_message=tool_result.error_message,
+        ))
         return {
             "tool_result": tool_result,
             "last_outcome": outcome,
-            "history": [*state["history"], _history_line(
-                steps_taken, str(action["tool_name"]), history_params, tool_result.success,
-                tool_result.error_code, tool_result.error_message,
-            )],
-            "notes": notes,
             "steps_taken": steps_taken,
             "committed": committed,
             "commit_reasoning": commit_reasoning,
@@ -532,17 +603,34 @@ def run_session_via_graph(
     See run_session()'s docstring for `pool_from_branch_ids`.
     """
     session_id = session_id or _new_session_id()
-    engine, gateway, ctx, router, tools_summary, branch_id, chrono, seed_notes = _prepare_session(
+    engine, gateway, ctx, router, tools_summary, branch_id, chrono, memory = _prepare_session(
         sim_config, redteam_config, warmup_checkpoint_id, from_genesis, session_id, router, identity_file,
         pool_from_branch_ids,
     )
-    graph = build_graph(engine, gateway, ctx, router, redteam_config, tools_summary, chrono, on_step=on_step)
+    graph = build_graph(
+        engine, gateway, ctx, router, redteam_config, tools_summary, chrono, memory, on_step=on_step
+    )
 
     initial_state: RedTeamGraphState = {
-        "world_summary": "", "last_outcome": None, "history": [], "notes": list(seed_notes), "action": None,
+        "user_message": "", "last_outcome": None, "action": None,
         "tool_result": None, "steps_taken": 0, "committed": False, "commit_reasoning": None,
     }
-    final_state = graph.invoke(initial_state)
+    try:
+        final_state = graph.invoke(initial_state)
+    except Exception:
+        # Mirrors run_session()'s per-step guard: keep the work rather
+        # than losing a long session to one unrecoverable turn. LangGraph
+        # owns the loop here so there is no per-step hook to break out
+        # of — but `memory` is the harness's own object and has been
+        # accumulating throughout, so steps_taken is recoverable from it
+        # and the branch still gets its end checkpoint below.
+        logger.exception(
+            "Unrecoverable error inside graph session — checkpointing what completed",
+            session_id=session_id, steps_taken=len(memory.steps),
+        )
+        final_state = {
+            "steps_taken": len(memory.steps), "committed": False, "commit_reasoning": None,
+        }
 
     result = SessionResult(
         branch_id=branch_id, session_id=session_id,
