@@ -10,6 +10,9 @@ Run with:  uv run uvicorn api.main:app --reload --port 8000
 from __future__ import annotations
 
 import asyncio
+import uuid
+SERVER_RUN_ID = uuid.uuid4().hex
+
 import dataclasses
 from contextlib import asynccontextmanager
 
@@ -116,7 +119,7 @@ def _list_redteam_branches() -> list[dict]:
             "branch_id": branch_id,
             "name": f"🔴 {branch_id.removeprefix('red-team/')}",
             # Only attach to 'main' if the origin checkpoint actually exists in THIS session's memory
-            "parent_branch_id": "main" if (c_meta and c_meta.get("origin_checkpoint") in demo_checkpoints) else None,
+            "parent_branch_id": "main" if (c_meta and c_meta.get("server_run_id") == SERVER_RUN_ID) else None,
             "parent_checkpoint_id": None,
             "fork_seq_num": fork_seq_num or 0,
             "head_seq_num": head_seq_num,
@@ -298,7 +301,7 @@ def _export_checkpoint_to_postgres(checkpoint_id: str) -> str:
         state_hash=engine.get_state_hash(),
         aggregate_snapshot=engine.get_full_snapshot_bytes(),
         rng_state=engine._rng.get_state(),
-        metadata={"source": "demo_bridge", "origin_checkpoint": checkpoint_id},
+        metadata={"source": "demo_bridge", "origin_checkpoint": checkpoint_id, "server_run_id": SERVER_RUN_ID},
     )
     return checkpoint.checkpoint_id
 
