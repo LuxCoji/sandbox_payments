@@ -70,6 +70,31 @@ def test_build_router_skips_deployments_missing_their_key(
     assert model_list[0]["litellm_params"]["model"] == "groq/llama-3.3-70b-versatile"
 
 
+def test_build_router_passes_through_per_deployment_max_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ProviderDeployment.max_tokens (e.g. the nvidia nemotron reasoning
+    deployment in providers.yaml — its <think> trace shares the completion-
+    token budget with the JSON output) must reach litellm_params, not be
+    silently dropped the way rpm/api_base would be if the same "if truthy"
+    passthrough were forgotten for a new field.
+    """
+    providers_file = tmp_path / "providers.yaml"
+    providers_file.write_text(
+        "deployments:\n"
+        "  - provider: nvidia\n"
+        "    litellm_model: nvidia_nim/nvidia/nemotron-3-super-120b-a12b\n"
+        "    api_key_env: TEST_NVIDIA_KEY\n"
+        "    max_tokens: 16384\n"
+    )
+    monkeypatch.setenv("TEST_NVIDIA_KEY", "fake-nvidia-key")
+    config = RedTeamConfig(providers_file=providers_file, enable_otel_tracing=False)
+
+    router = build_router(config)
+
+    assert router.get_model_list()[0]["litellm_params"]["max_tokens"] == 16384
+
+
 def test_build_router_raises_if_no_deployment_has_a_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -134,4 +159,41 @@ def test_decide_next_action_retries_on_rate_limit_then_succeeds(fixture_config: 
     with patch.object(router, "completion", side_effect=side_effects) as mock_completion:
         action = decide_next_action(router, fixture_config, "world view", "persona prompt")
     assert action.tool_name == "transfer_funds"
+    assert mock_completion.call_count == 2
+
+
+def _fake_response_content(content: str | None) -> SimpleNamespace:
+    message = SimpleNamespace(content=content)
+    choice = SimpleNamespace(message=message)
+    return SimpleNamespace(choices=[choice])
+
+
+def test_decide_next_action_retries_on_unparseable_response_then_succeeds(
+    fixture_config: RedTeamConfig,
+) -> None:
+    """A free-tier model returning prose instead of JSON is a formatting
+    failure, not a rate-limit failure — previously this propagated the raw
+    ValueError straight out of decide_next_action and crashed the whole
+    session on a single bad turn (see the fix's comment in llm_router.py).
+    It must be retried (bounded, separately from the rate-limit backoff)
+    instead.
+    """
+    router = build_router(fixture_config)
+    side_effects = [
+        _fake_response_content("I'm not going to do that."),
+        _fake_response("inspect_account"),
+    ]
+    with patch.object(router, "completion", side_effect=side_effects) as mock_completion:
+        action = decide_next_action(router, fixture_config, "world view", "persona prompt")
+    assert action.tool_name == "inspect_account"
+    assert mock_completion.call_count == 2
+
+
+def test_decide_next_action_raises_after_max_parse_retries(fixture_config: RedTeamConfig) -> None:
+    fixture_config = fixture_config.model_copy(update={"max_parse_retries": 2})
+    router = build_router(fixture_config)
+    with patch.object(
+        router, "completion", return_value=_fake_response_content("still not JSON")
+    ) as mock_completion, pytest.raises(ValueError, match="No JSON object"):
+        decide_next_action(router, fixture_config, "world view", "persona prompt")
     assert mock_completion.call_count == 2

@@ -118,6 +118,8 @@ def build_router(config: RedTeamConfig | None = None) -> Router:
             litellm_params["api_base"] = d.api_base
         if d.rpm:
             litellm_params["rpm"] = d.rpm
+        if d.max_tokens:
+            litellm_params["max_tokens"] = d.max_tokens
         model_list.append({"model_name": config.model_name, "litellm_params": litellm_params})
 
     if not model_list:
@@ -182,6 +184,7 @@ def decide_next_action(
 
     backoff_s = config.retry_backoff_base_s
     attempt = 0
+    parse_failures = 0
     while True:
         attempt += 1
         try:
@@ -189,7 +192,30 @@ def decide_next_action(
             response = router.completion(model=config.model_name, messages=messages)
             latency_ms = (time.monotonic() - call_started) * 1000
             content = response.choices[0].message.content
-            parsed = _parse_next_action(content)
+            try:
+                parsed = _parse_next_action(content)
+            except (ValueError, KeyError, TypeError) as exc:
+                # Not a rate-limit/connectivity failure — a free-tier model
+                # returned content that isn't a well-formed {"tool_name":
+                # ...} object at all (prose refusal, truncated output,
+                # missing "tool_name" key). Previously uncaught: this
+                # propagated straight out of decide_next_action and crashed
+                # the whole session on a single bad turn — losing every step
+                # already taken (the end-of-session checkpoint only runs
+                # after the loop finishes normally) over what's usually a
+                # one-off formatting slip from a small model, not a real
+                # failure. Bounded retry (config.max_parse_retries, separate
+                # counter from the rate-limit backoff above) gives the
+                # Router a chance to land the retry on a different, better-
+                # behaved deployment before giving up for real.
+                parse_failures += 1
+                logger.warning(
+                    "Unparseable LLM response (parse attempt %d/%d): %s",
+                    parse_failures, config.max_parse_retries, exc,
+                )
+                if parse_failures >= config.max_parse_retries:
+                    raise
+                continue
             action = dataclasses.replace(
                 parsed, provider_model=getattr(response, "model", None), latency_ms=latency_ms
             )

@@ -49,9 +49,18 @@ deployments:
   - provider: nvidia
     # Model *catalog* access varies per NVIDIA account even when the model
     # is listed at GET /v1/models — nvidia/llama-3.1-nemotron-70b-instruct
-    # 404'd as "not found for account" despite being listed; this one was
-    # the first candidate that actually returned a completion for this key.
-    litellm_model: nvidia_nim/meta/llama-3.2-11b-vision-instruct
+    # 404'd as "not found for account" despite being listed. Switched from
+    # meta/llama-3.2-11b-vision-instruct to the Nemotron reasoning model —
+    # not re-verified live against this key yet (see the curl command
+    # above), confirm it returns a completion rather than 404ing before
+    # relying on it. Nemotron is a reasoning model: its <think>...</think>
+    # trace shares the same completion-token budget as the actual
+    # {"tool_name": ...} JSON output (see max_tokens below and
+    # ProviderDeployment.max_tokens in config.py) — don't cap it back down
+    # without checking whether that just truncates the trace before the
+    # JSON ever gets emitted.
+    litellm_model: nvidia_nim/nvidia/nemotron-3.5-lightning-30b-a3b
     api_base: "https://integrate.api.nvidia.com/v1"
     api_key_env: NVIDIA_API_KEY_1
     rpm: 40 # unofficial community estimate, soft cap
+    max_tokens: 16384 # generous headroom for reasoning tokens + the JSON output that follows them

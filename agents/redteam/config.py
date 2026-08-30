@@ -23,6 +23,19 @@ class ProviderDeployment(BaseModel):
     api_key_env: str
     api_base: str | None = None
     rpm: int | None = None
+    # Per-deployment ceiling on completion tokens, passed straight through
+    # to litellm.Router as this deployment's litellm_params["max_tokens"].
+    # None (the default) leaves the provider's own default in place — most
+    # of the pool's non-reasoning models don't need this overridden. Exists
+    # for reasoning models (e.g. the nvidia nemotron deployment below):
+    # their <think>...</think> trace shares the same completion-token
+    # budget as the actual {"tool_name": ...} JSON output, so a low/default
+    # max_tokens truncates mid-thought before the model ever emits the JSON
+    # — which then fails _parse_next_action's "no JSON object found" check,
+    # indistinguishable from the model just refusing to answer. Set
+    # generously for those deployments rather than left to whatever a given
+    # provider's undocumented default happens to be.
+    max_tokens: int | None = None
 
 
 class RedTeamConfig(BaseSettings):
@@ -54,6 +67,18 @@ class RedTeamConfig(BaseSettings):
     session_max_steps: int = 30
     retry_backoff_base_s: float = 2.0
     retry_backoff_max_s: float = 120.0
+
+    # Free-tier small models occasionally return content that isn't valid
+    # JSON at all (prose refusal, truncated output, no {...} block) even
+    # with _RESPONSE_INSTRUCTIONS in the prompt — this is a formatting
+    # failure, not a rate-limit/connectivity failure, so it must not share
+    # the RateLimitError/APIConnectionError backoff loop's "retry forever"
+    # behavior (a model that consistently can't follow the format would
+    # hang the session indefinitely). Bounded separately and small: a
+    # differently-routed retry (Router picks another deployment) usually
+    # recovers in 1-2 tries; after that, fail loudly rather than silently
+    # burning the session's step budget on retries alone.
+    max_parse_retries: int = 3
 
     # Route litellm's routing/latency/token telemetry (and the agent's
     # parsed "reasoning" per turn) into the OTLP pipeline sim.observability

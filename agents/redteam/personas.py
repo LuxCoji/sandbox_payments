@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from sim.core.account import ACCOUNT_TYPE_MULTIPLIERS, KYC_DAILY_LIMITS
 
 if TYPE_CHECKING:
-    from sim.core.interfaces import WorldView
+    from sim.core.interfaces import AccountSnapshot, WorldView
     from sim.gateway.interfaces import ToolSpec
 
 
@@ -110,6 +110,18 @@ NOT a signal about detection thresholds, KYC limits, or anything else
 worth building a strategy around. If you see it, don't reason about it as
 a business rule; just try a different action (different parameters, a
 different account, or a different tool) and move on.
+
+You always know exactly how much you can move, the same way a real account
+holder knows their own balance without guessing: every account you own is
+shown each turn with max_transferable_now_paise already computed — balance
+and whatever's left of today's KYC/account-type daily allowance, combined
+into one hard ceiling. Never pick a transfer/payment amount above that
+number for that source account, and never respond to DEBIT_REJECTED or
+LIMIT_EXCEEDED by guessing a smaller number and trying again — the exact
+figure was already in front of you before you made the failed call. Read it
+once, pick an amount at or under it, and get the source right the first
+time; repeatedly poking at the same rejection with different guesses wastes
+steps for no new information.
 """
 
 
@@ -120,6 +132,37 @@ different account, or a different tool) and move on.
 # --users 1000 branch. Own accounts are never capped — the agent always
 # needs the complete, current picture of its own money.
 _MAX_OTHER_ACCOUNTS_SHOWN = 20
+
+
+def _max_transferable_now_paise(acc: AccountSnapshot) -> int:
+    """The hard ceiling on what `acc` can send as a transfer/payment SOURCE
+    right now: min(current balance, whatever's left of today's KYC/account-type
+    daily allowance). Mirrors sim/core/account.py's own
+    Account.can_debit()/check_daily_limit() logic (available_paise vs.
+    balance — reserved_paise isn't in AccountSnapshot, so this treats the
+    two as equal, which holds for every account a red-team session actually
+    produces today; daily_limit_paise() with ACCOUNT_TYPE_MULTIPLIERS==0
+    means no daily cap at all, balance is the only constraint).
+
+    This exists because real sessions were observed guessing amounts blindly
+    and iterating on DEBIT_REJECTED/LIMIT_EXCEEDED failures one poke at a
+    time — a dozen-plus wasted steps in a row in one recorded session,
+    despite balance_paise/daily_tx_volume_paise being right there in the
+    prompt every turn. A human moving their own money doesn't grope for
+    their own balance by trial and error; they just know it. Free-tier
+    small models are unreliable at doing that arithmetic (limit * multiplier
+    - already-spent, compared against balance) themselves turn after turn,
+    so it's done here once, mechanically, and handed over as a ready number
+    instead of raw inputs to compute from — the same "give it the answer,
+    not the homework" fix _public_limits_block() already applies to the
+    KYC tier table itself.
+    """
+    multiplier = ACCOUNT_TYPE_MULTIPLIERS.get(acc.account_type, 1)
+    if multiplier == 0:
+        return acc.balance_paise
+    limit = KYC_DAILY_LIMITS.get(acc.kyc_level, KYC_DAILY_LIMITS[0]) * multiplier
+    remaining_daily = max(0, limit - acc.daily_tx_volume_paise)
+    return min(acc.balance_paise, remaining_daily)
 
 
 def summarize_world_view(view: WorldView) -> str:
@@ -139,7 +182,10 @@ def summarize_world_view(view: WorldView) -> str:
         lines.append(
             f"  - {acc.account_id} [{acc.account_type.value}]: balance_paise={acc.balance_paise}, "
             f"status={acc.status.value}, kyc_level={acc.kyc_level}, "
-            f"daily_tx_count={acc.daily_tx_count}, daily_tx_volume_paise={acc.daily_tx_volume_paise}"
+            f"daily_tx_count={acc.daily_tx_count}, daily_tx_volume_paise={acc.daily_tx_volume_paise}, "
+            f"max_transferable_now_paise={_max_transferable_now_paise(acc)} (hard ceiling for a transfer/"
+            f"payment FROM this account this turn — balance and today's remaining daily allowance "
+            f"already combined for you, don't send more than this and don't guess)"
         )
 
     if other:
@@ -160,6 +206,9 @@ def summarize_world_view(view: WorldView) -> str:
     return "\n".join(lines)
 
 
+_POOLED_NOTE_PREFIX = "[from "
+
+
 def summarize_target_notes(notes: list[str]) -> str:
     """Render the agent's own save_note history — its only durable memory
     of which accounts it has decided to target and why, since the world
@@ -167,13 +216,51 @@ def summarize_target_notes(notes: list[str]) -> str:
     (agents/redteam/harness.py::_HISTORY_WINDOW) is short. Unlike the
     account list this is never truncated: notes are the agent's own
     curated, presumably-already-short summary, not raw simulation state.
+
+    Notes pooled in from an earlier session (harness.py::_pool_notes_from_branches,
+    always prefixed "[from <branch_id>...]" — see there) are mixed into the
+    same list as this session's own save_note calls. Without saying so
+    explicitly, a continued session had no reason to treat those any
+    differently from its own fresh discoveries — real sessions showed this
+    plays out as literally repeating the prior session's already-committed
+    move for the rest of the run (docs/redteam_agent_design.md §10's
+    UNAUTHORIZED_SOURCE finding: 5 steps to find it, 10 more steps repeating
+    it) rather than using the prior finding as a starting point for
+    something the prior session didn't already cover. This is the
+    "prompt injection" fix for that: distinguish the two kinds of note in
+    the rendered block itself and instruct against re-demonstrating what's
+    already proven.
     """
     if not notes:
         return (
             "Your saved target notes: (none yet — call save_note once you've picked an "
             "account to target, so you don't lose track of it across turns)"
         )
-    return "Your saved target notes:\n" + "\n".join(f"  - {n}" for n in notes)
+    pooled = [n for n in notes if n.startswith(_POOLED_NOTE_PREFIX)]
+    own = [n for n in notes if not n.startswith(_POOLED_NOTE_PREFIX)]
+    lines = []
+    if pooled:
+        lines.append(
+            "Notes pooled in from EARLIER sessions (already investigated/demonstrated by a "
+            "prior run — not something you found yourself this session):"
+        )
+        lines.extend(f"  - {n}" for n in pooled)
+        lines.append(
+            "Do not spend this session re-demonstrating one of the above from scratch — that "
+            "ground is already covered. Use them as a starting point: either push the same "
+            "pattern further than the prior session did (a different account type, a larger "
+            "or differently-timed move, a variant that might evade the same check differently), "
+            "or use the freed-up steps to probe a DIFFERENT pattern entirely (see the fraud "
+            "patterns listed in your instructions). Only commit_strategy again if you've actually "
+            "found or extended something beyond what's already listed here."
+        )
+    if own:
+        if pooled:
+            lines.append("\nYour OWN saved notes from this session:")
+        else:
+            lines.append("Your saved target notes:")
+        lines.extend(f"  - {n}" for n in own)
+    return "\n".join(lines)
 
 
 # ToolSpec.parameter_schema is registered as an empty {} for every tool in
@@ -189,13 +276,19 @@ _TOOL_PARAM_HINTS: dict[str, str] = {
     "transfer_funds": (
         "source_account_id (required, string — must be an account you own; "
         "UNAUTHORIZED_SOURCE otherwise), target_account_id (required, string — any visible "
-        "account, yours or not), amount_paise (required, integer — paise, not rupees), "
+        "account, yours or not), amount_paise (required, a bare JSON integer — paise, not "
+        "rupees, e.g. 500000, NEVER a string, and NEVER with a unit/currency suffix like "
+        "'500000p' or '₹5000' attached — that fails as INVALID_PARAMETER; also check the "
+        "source account's max_transferable_now_paise this turn and stay at or under it), "
         "idempotency_key (optional)"
     ),
     "make_payment": (
         "source_account_id (required, string — must be an account you own; "
         "UNAUTHORIZED_SOURCE otherwise), target_account_id (required, string — any visible "
-        "account, yours or not), amount_paise (required, integer — paise, not rupees), "
+        "account, yours or not), amount_paise (required, a bare JSON integer — paise, not "
+        "rupees, e.g. 500000, NEVER a string, and NEVER with a unit/currency suffix like "
+        "'500000p' or '₹5000' attached — that fails as INVALID_PARAMETER; also check the "
+        "source account's max_transferable_now_paise this turn and stay at or under it), "
         "gateway_id (optional), idempotency_key (optional)"
     ),
     "inspect_account": "account_id (required, string — any account_id from your world view, yours or not)",
