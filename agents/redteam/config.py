@@ -80,6 +80,24 @@ class RedTeamConfig(BaseSettings):
     # burning the session's step budget on retries alone.
     max_parse_retries: int = 3
 
+    # Fraction of the step budget that must be spent before commit_strategy
+    # is allowed to end the session.
+    #
+    # The movement-count floor in commit_strategy_handler (sim/main.py) is
+    # necessary but got Goodharted immediately: sessions committed the
+    # instant they became eligible, with reasoning that said so out loud
+    # ("reaching the 3-transaction threshold required for a valid
+    # pattern"), leaving two thirds of the budget unused. Any *stateable*
+    # threshold becomes the target, so this one is deliberately about
+    # spending the budget rather than about hitting a countable score —
+    # there is nothing to optimise toward except doing more work.
+    #
+    # Enforced in the harness rather than the tool handler on purpose:
+    # this is session pacing policy, which belongs to whatever is running
+    # the session, whereas the evidence floor is about not tagging a
+    # branch as a finding without support and belongs with the branch data.
+    min_commit_step_fraction: float = 0.5
+
     # Route litellm's routing/latency/token telemetry (and the agent's
     # parsed "reasoning" per turn) into the OTLP pipeline sim.observability
     # already points at Grafana Cloud — never the terminal. Defaults True so

@@ -566,6 +566,169 @@ made yet.
 
 ---
 
+## 13. Context-flow rework — why sessions produced trivia, and what changed
+
+Sessions were reliably ending in one of two ways, neither useful: commit
+at step 3–6 of 30 off a single successful transfer described as
+"demonstrated laundering, evaded fraud controls", or a death loop
+(one real session spent 15 consecutive steps re-attempting the same
+rejected transfer with different amounts). Both are context-flow
+defects, not model-quality defects — the agent was behaving reasonably
+given what it was actually shown.
+
+**Context assembly had no owner.** `harness.py` concatenated a
+`world_summary` string; `llm_router.decide_next_action()` separately
+decided the message layout and interleaved history/outcome blocks
+around it. Nothing owned the whole picture, so each addition landed
+wherever was easiest. Assembly now lives in one place,
+`agents/redteam/context.py` (`TurnContext.render()`), which owns which
+blocks exist and in what order. `llm_router` does routing, retry and
+parsing only, and takes an already-rendered message. `personas.py`
+keeps the static persona prompt and the individual renderers.
+
+What the model was missing, in rough order of impact:
+
+| Gap | Effect observed | Fix |
+|---|---|---|
+| **Step budget never shown.** `session_max_steps` appeared nowhere in any prompt — the agent could not know if it had 3 steps or 300. | With no budget signal, banking the first success is rational. Hence commit at step 3. | `render_budget()` — step N of M, steps remaining, plus a phase directive (EARLY/MIDDLE/LATE/FINAL) naming what to do with the remaining budget. |
+| **No cumulative record.** Only a 12-step rolling window plus agent-initiated notes. | A fraud pattern is a claim about an aggregate (N movements, M accounts, total value). With only recent events visible, every claim was necessarily about the last transfer — so commits described one transaction, accurately. | `render_evidence()` — every successful value movement for the whole session, never truncated, with totals (count, paise moved, distinct sources/destinations). |
+| **`sim_time_ns` frozen but rendered as a live clock.** A forked branch resumes with an empty scheduler queue and `execute_command()` never advances time, so the clock never moved; the world view printed the raw nanosecond integer. | Every time-dependent pattern the prompt asked for (cash-out speed, structuring across days, velocity) was structurally impossible, and nothing said so. Daily limits never reset, making each account's allowance a silent one-shot session budget. | `format_sim_clock()` renders sim day + time of day; the clock block states the frozen-clock fact explicitly. New `advance_time` tool (below) makes it actually movable. |
+| **Repeat failures left for the model to notice.** Twelve individual history lines, plus "do not blindly repeat a FAILED action". | It did not notice. 15 consecutive re-attempts. | `render_repeat_failures()` aggregates by (tool, source, target) — deliberately ignoring amount, since varying the amount is exactly the loop — and surfaces anything failed ≥2× as its own block. |
+| **History dropped reasoning.** Lines recorded what was done, not why. | Strategy evaporated every turn; the agent re-derived intent from world state each time, which is why sessions wandered. | History lines carry a compressed reasoning tail; `_RESPONSE_INSTRUCTIONS` now tells the model its `reasoning` is replayed to it later and is where strategy lives, instead of asking for "<short reasoning>". |
+
+**Two tool-contract changes**, both in `_register_redteam_tools`
+(`sim/main.py`) — red-team API surface, not simulation business logic:
+
+- **`advance_time(hours)`** — new. Nothing else moves the clock on a
+  red-team branch. Crossing a sim-day boundary resets every account's
+  daily counters (`Account.check_daily_limit`), which is the only way
+  to express repetition-over-time, velocity, or a fresh daily
+  allowance. Safe to expose: `env.run(until=…)` on an empty queue
+  processes zero events and just moves `_now` (`sim/scheduler/env.py`),
+  so it cannot trip the superlinear event-growth issue in `CLAUDE.md`
+  — that concerns *scheduling* population events, and a forked branch
+  has none in flight.
+- **`commit_strategy` is now structured and gated.** It requires
+  `pattern` (fraud class + concrete route) and `impact` (value moved,
+  hops/accounts, which control the route never had to satisfy), and is
+  refused with `INSUFFICIENT_EVIDENCE` below 3 successful value
+  movements. The count comes from the ChronoDAG's own event log
+  (`AccountDebited` events for this actor in `checkout().pending_events`),
+  not from anything the agent self-reports, so it cannot be inflated by
+  failed attempts. The prose bar it replaces ("commit only once you've
+  actually tried something and observed its outcome") was satisfied by
+  any single success, so it never bound.
+
+**Prompt honesty about what evidence means.** The persona previously
+asked for "patterns a fraud system should flag but doesn't." There is
+no behavioural fraud engine, risk scoring, or alerting anywhere in the
+simulation — `Capability.VIEW_RISK_SCORES`/`VIEW_ALERTS` exist in the
+enum but nothing produces either. The only controls are four
+deterministic checks (`UNAUTHORIZED_SOURCE`, `DEBIT_REJECTED`, account
+status, `LIMIT_EXCEEDED`). So "it succeeded and nothing flagged it" is
+true of *every* transaction that clears those checks and conveys
+nothing — which is exactly what committed findings kept saying. The
+prompt now states this directly and forbids "evaded detection" framing,
+redirecting to the concrete shape achieved: total value, hops,
+accounts, sequence, and which check the route never had to satisfy.
+
+**One supporting interface addition.** `AccountSnapshot.last_tx_day`
+(`sim/core/interfaces.py`). Daily counters reset lazily, so after the
+clock crosses a day boundary a snapshot still shows yesterday's volume
+while the engine treats today's spend as 0. Without this field the
+precomputed `max_transferable_now_paise` would under-report right after
+an `advance_time` — and since the prompt tells the agent to trust that
+number over its own arithmetic, a stale value would not merely mislead,
+it would block moves the engine would allow.
+
+---
+
+## 14. Both §13 guardrails got Goodharted — what replaced them
+
+§13's gates worked mechanically and were immediately gamed. Three
+consecutive sessions after it landed committed structurally identical
+findings, and said so in their own reasoning:
+
+- *"reaching the 3-transaction threshold required for a valid pattern"* —
+  the evidence floor became the target. Sessions committed at step 6–10
+  of 30, leaving two thirds of the budget unspent.
+- *"using unlisted accounts distinct from prior session notes"* — the
+  mechanically-extracted pooled account-id list (§13 / the notes block)
+  made **fresh UUIDs** the novelty test. Sessions minted new accounts and
+  re-ran the identical route through them.
+
+Both are the same failure: a *stateable* threshold becomes the
+objective. The fixes avoid restating a number to optimise toward.
+
+**The missing cross-session loop.** `commit_strategy` has written
+`committed_pattern` (the pattern class claimed) to branch metadata since
+it became structured — but nothing ever read it back.
+`_pool_notes_from_branches` pooled `target_notes` and `commit_reasoning`
+only, so the one field naming what had already been found was invisible
+to the next session. That is the mechanical reason every session
+independently rediscovered "multi-hop layering" and committed it as
+novel. It now returns `(notes, committed_patterns)`, and
+`personas.summarize_prior_patterns()` renders the already-committed
+classes as an explicit avoid-list.
+
+**Novelty reframed from account ids to pattern class.** The pooled
+account ids are still shown (they are useful context) but explicitly
+marked as *not* the novelty test, with the failure named: minting fresh
+accounts and running the same shape is "the same finding with different
+UUIDs".
+
+**Pacing gate.** `RedTeamConfig.min_commit_step_fraction` (default 0.5)
+— `commit_strategy` is refused with `TOO_EARLY_TO_COMMIT` until half the
+step budget is spent. Deliberately not a countable score: the only way
+past it is to do more work. Enforced in the harness
+(`_too_early_to_commit`), not the tool handler, because it depends on
+the step budget — a session-runner concept. The evidence floor stays in
+the handler, where it protects the branch's committed metadata. Checked
+*before* dispatch, so a commit that will be rejected never tags the
+branch on its way through.
+
+**A pattern playbook, grounded in the real control gaps.**
+`_PATTERN_PLAYBOOK` replaces the one-sentence "structuring, layering,
+mule cash-out" list that gave the model nothing to work through.
+
+Its framing correction matters more than its content: **`create_account`
+is provisioning apparatus, not an attack surface.** It lets the caller
+choose `account_type`, `kyc_level` and `initial_balance_paise` because
+it is how a red-team session equips itself for an experiment — there is
+no user-facing flow behind it. An earlier draft of this playbook treated
+those parameters as vulnerabilities ("self-asserted KYC",
+"self-provisioned value"); that was wrong, and is now called out
+explicitly as the *first* thing in the playbook: creating an account of
+any type, tier or balance is never a finding, and neither is "a transfer
+succeeded" or "nothing flagged it". Reporting those is reporting your
+own setup back to yourself.
+
+What the playbook points at instead are the actual gaps in
+`_execute_transfer`/`_execute_payment`, which validate **only the
+source** — ownership, ACTIVE status, funds, and that one account's daily
+volume:
+
+| Gap | Not checked anywhere |
+|---|---|
+| Destination has no inbound cap | `check_daily_limit` is called on `src` only. A kyc_level 0 account capped at ₹10k/day *outbound* can be credited without bound — the mule-account primitive. |
+| Destination status unchecked | `can_debit` (status ACTIVE) applies to the source; nothing requires the target to be ACTIVE. |
+| Limits never aggregated per owner | Enforcement is strictly per account; nothing sums what one actor moved across all accounts it controls. |
+| Daily cap is a resettable rate limit | Counters reset on the sim-day boundary and `advance_time` is the agent's to call. |
+| Only volume is capped, not count | `daily_tx_count` is tracked and never enforced against anything. |
+
+Each entry states what would make a demonstration convincing, and every
+one demands a quantity — "a finding with no quantity in it is a
+description of a transfer, not a finding."
+
+**Honest caveat on model capability.** Part of this is free-tier model
+behaviour: `gemini-3.5-flash-lite` and `openai/gpt-oss-120b` latch onto
+explicit numeric criteria and satisfy them literally. A stronger model
+would game a loose spec less. But the specs above were genuinely
+gameable, and the right fix is a spec that cannot be satisfied without
+doing the work — not a better model papering over a weak one.
+
+---
+
 ## Known limitations
 
 - **Forked red-team branches resume with an empty scheduler queue.**

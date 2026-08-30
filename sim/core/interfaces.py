@@ -137,6 +137,15 @@ class AccountSnapshot:
     linked_device_ids: tuple[str, ...]
     owner_id: str = ""                       # real ID (own view) or pseudonymous hash (masked view)
     merchant_category_code: str | None = None  # MCC, only for MERCHANT accounts
+    # The sim day (sim_time_ns // NANOS_PER_DAY) daily_tx_count/
+    # daily_tx_volume_paise were last touched on. Without it, those two
+    # counters are un-interpretable from a snapshot alone: Account resets
+    # them lazily (see Account.check_daily_limit / _maybe_reset_daily_counters),
+    # so a snapshot taken after the clock crossed a day boundary still shows
+    # yesterday's volume even though the effective spent-today is 0. Any
+    # consumer computing "how much can this account still send" needs to
+    # compare this against the current sim day or it silently under-reports.
+    last_tx_day: int = 0
 
 
 @dataclass(frozen=True)

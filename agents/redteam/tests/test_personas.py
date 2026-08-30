@@ -1,8 +1,21 @@
 """Unit tests for personas.py's prompt-assembly helpers."""
 from __future__ import annotations
 
-from agents.redteam.personas import _max_transferable_now_paise, summarize_target_notes, summarize_world_view
+import uuid
+
+from agents.redteam.personas import (
+    _max_transferable_now_paise,
+    summarize_prior_patterns,
+    summarize_target_notes,
+    summarize_world_view,
+)
 from sim.core.interfaces import AccountSnapshot, AccountStatus, AccountType, ActorRole, GlobalParams, WorldView
+
+# NOTE: uuid.uuid4() here, not sim.*'s uuid5 determinism rule (CLAUDE.md) —
+# that rule is scoped to sim/ for state-hash reproducibility; this is test
+# fixture data in agents/redteam/tests/, generated fresh per test run
+# specifically so the assertions can't be mistaken for depending on any
+# particular account_id's shape or digits, only on "is a UUID".
 
 
 def _account(
@@ -97,3 +110,43 @@ def test_summarize_target_notes_pooled_only() -> None:
     rendered = summarize_target_notes(notes)
     assert "found X" in rendered
     assert "Your OWN saved notes" not in rendered
+
+
+def test_summarize_target_notes_frames_novelty_as_pattern_not_account_ids() -> None:
+    """Pooled account ids are surfaced as context, but must NOT be presented
+    as the novelty test.
+
+    An earlier version told the agent to check whether its flow involved an
+    account_id absent from the pooled list. Sessions then optimised for
+    exactly that: minting fresh accounts and re-running the identical route
+    through them, with reasoning like "using unlisted accounts distinct
+    from prior session notes". Same finding, new UUIDs. Novelty has to be
+    about the pattern class, so the ids stay (they are useful) but the
+    instruction attached to them changed.
+    """
+    cash_entity_id = str(uuid.uuid4())
+    personal_id = str(uuid.uuid4())
+    notes = [
+        f"[from red-team/session-1, prior session's commit_strategy] routed funds through "
+        f"CASH_ENTITY account {cash_entity_id} to low-KYC personal account {personal_id}",
+    ]
+    rendered = summarize_target_notes(notes)
+    assert cash_entity_id in rendered
+    assert personal_id in rendered
+    assert "not what" in rendered and "makes a session novel" in rendered
+    assert "PATTERN CLASS" in rendered
+    assert "same finding with different UUIDs" in rendered
+
+
+def test_summarize_prior_patterns_lists_committed_classes() -> None:
+    """commit_strategy has recorded committed_pattern on branch metadata
+    since it became structured, but nothing read it back — so every session
+    independently rediscovered "multi-hop layering" and committed it as
+    novel. This is the block that closes that loop.
+    """
+    assert "none" in summarize_prior_patterns([]).lower()
+
+    rendered = summarize_prior_patterns(["[red-team/s1] cyclic layering (claimed impact: 2.5M paise)"])
+    assert "ALREADY COMMITTED" in rendered
+    assert "cyclic layering" in rendered
+    assert "would paraphrase one of the above is not a new" in rendered

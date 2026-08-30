@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 import litellm
 from litellm import Router
+from litellm.types.router import RouterRateLimitError, RouterRateLimitErrorBasic
 from opentelemetry import trace as otel_trace
 
 from agents.redteam.config import RedTeamConfig, load_provider_deployments, resolve_api_key
@@ -62,7 +63,13 @@ def _maybe_register_otel_callback(config: RedTeamConfig) -> None:
 # JSON-mode-via-prompt is the lowest common denominator across all four.
 _RESPONSE_INSTRUCTIONS = """
 Respond with a single JSON object and nothing else, in this exact shape:
-{"tool_name": "<tool>", "parameters": {...}, "reasoning": "<short reasoning>"}
+{"tool_name": "<tool>", "parameters": {...}, "reasoning": "<reasoning>"}
+
+"reasoning" is not a caption for the action — it is the only part of your
+thinking that survives to future turns (it is replayed back to you in your
+step history), so it is where your strategy lives. State what step of your
+pattern this is and what you expect it to establish. Do not restate what
+the tool does or narrate the world state back.
 """
 
 
@@ -135,22 +142,21 @@ def build_router(config: RedTeamConfig | None = None) -> Router:
 def decide_next_action(
     router: Router,
     config: RedTeamConfig,
-    world_view_summary: str,
+    user_message: str,
     persona_prompt: str,
-    last_action_outcome: str | None = None,
-    history: tuple[str, ...] = (),
 ) -> NextAction:
-    """One lockstep LLM call: given the current world view, a bounded window
-    of prior-step history, and the outcome of the previous action (None on
-    the first turn), decide exactly one next tool call.
+    """One lockstep LLM call: given the fully-assembled turn context,
+    decide exactly one next tool call.
 
-    `history` is a tuple of short one-line step summaries ("#3 create_account:
-    OK", "#4 transfer_funds: FAILED (LIMIT_EXCEEDED) ..."), oldest first,
-    already bounded by the caller (harness.py's _HISTORY_WINDOW) — without
-    it the agent only ever saw the single most recent outcome and had no
-    memory of anything before that, so a rotating pool of 4 different
-    providers with no shared state beyond one line back would routinely
-    repeat an action it had already tried and failed at several steps ago.
+    `user_message` arrives already rendered — this function does not
+    compose it. Prompt composition lives in agents/redteam/context.py
+    (TurnContext.render), which owns block selection and ordering; this
+    module owns routing, retry/backoff, and response parsing. They were
+    previously entangled: the harness built a "world_summary" string and
+    this function separately decided where the history and last-outcome
+    blocks went around it, so no single place was responsible for what
+    the model actually saw. See context.py's module docstring for the
+    defects that split caused.
 
     On full-pool exhaustion (every deployment rate-limited), block and retry
     with exponential backoff up to retry_backoff_max_s per attempt — per the
@@ -164,22 +170,9 @@ def decide_next_action(
     alongside litellm's own routing/latency spans (see
     _maybe_register_otel_callback), never printed to the terminal.
     """
-    history_block = (
-        "Recent action history, oldest to newest (do not blindly repeat a "
-        "FAILED action — read why it failed):\n" + "\n".join(history)
-        if history else "Recent action history: (none yet — this is early in the session)"
-    )
     messages = [
         {"role": "system", "content": persona_prompt + _RESPONSE_INSTRUCTIONS},
-        {
-            "role": "user",
-            "content": (
-                f"Current world view:\n{world_view_summary}\n\n"
-                f"{history_block}\n\n"
-                f"Outcome of your last action: {last_action_outcome or '(this is your first turn)'}\n\n"
-                "Decide your next single action."
-            ),
-        },
+        {"role": "user", "content": user_message},
     ]
 
     backoff_s = config.retry_backoff_base_s
@@ -223,6 +216,30 @@ def decide_next_action(
             span.set_attribute("redteam.tool_name", action.tool_name)
             span.set_attribute("redteam.reasoning", action.reasoning)
             return action
+        except (RouterRateLimitError, RouterRateLimitErrorBasic) as exc:
+            # "No deployments available for selected model" — every
+            # deployment in the pool is in litellm's cooldown list at
+            # once. This is the whole-pool-exhausted case §7 specifies
+            # block-and-retry for, but it was crashing the session
+            # instead: RouterRateLimitError subclasses ValueError, NOT
+            # litellm.RateLimitError, so the handler below never saw it
+            # and it propagated straight out of decide_next_action.
+            #
+            # Unlike a provider's own 429, litellm tells us exactly how
+            # long the cooldown has left, so honour that rather than
+            # guessing with the doubling backoff — retrying earlier just
+            # reproduces the same error. Floored at 1s and capped at
+            # retry_backoff_max_s so a pathological cooldown_time can't
+            # stall the session indefinitely in one sleep; if the cap is
+            # short of the real cooldown the next attempt simply sleeps
+            # again, which converges on its own.
+            cooldown_s = float(getattr(exc, "cooldown_time", 0.0) or 0.0)
+            wait_s = min(max(cooldown_s, 1.0), config.retry_backoff_max_s)
+            logger.warning(
+                "Whole provider pool in cooldown (attempt %d), waiting %.1fs: %s",
+                attempt, wait_s, exc,
+            )
+            time.sleep(wait_s)
         except litellm.RateLimitError:
             logger.warning(
                 "Provider pool exhausted (attempt %d), backing off %.1fs", attempt, backoff_s

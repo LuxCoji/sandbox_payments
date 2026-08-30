@@ -59,7 +59,7 @@ deployments:
     # ProviderDeployment.max_tokens in config.py) — don't cap it back down
     # without checking whether that just truncates the trace before the
     # JSON ever gets emitted.
-    litellm_model: nvidia_nim/nvidia/nemotron-3.5-lightning-30b-a3b
+    litellm_model: nvidia_nim/deepseek-ai/deepseek-v4-flash-0731
     api_base: "https://integrate.api.nvidia.com/v1"
     api_key_env: NVIDIA_API_KEY_1
     rpm: 40 # unofficial community estimate, soft cap

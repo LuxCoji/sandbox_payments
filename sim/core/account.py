@@ -182,6 +182,7 @@ class Account:
             linked_device_ids=tuple(sorted(self.linked_device_ids)),
             owner_id=self.owner_id,
             merchant_category_code=self.merchant_category_code,
+            last_tx_day=self.last_tx_day,
         )
 
     def to_canonical_dict(self) -> dict[str, object]:
