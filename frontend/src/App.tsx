@@ -9,7 +9,7 @@ import RedTeamDashboard from "./RedTeamDashboard";
 import Sparkline from "./Sparkline";
 import { formatSimTime, shortId } from "./eventStyle";
 
-type Tab = "feed" | "agents" | "checkpoints" | "sandbox";
+type Tab = "feed" | "agents" | "checkpoints" | "sandbox" | "historical";
 type View = "sim" | "redteam";
 
 const MAX_FEED = 150;
@@ -99,6 +99,7 @@ export default function App() {
     let timerId: number;
     let cancelled = false;
     const refresh = async () => {
+      if (selectedBranch.startsWith("red-team/")) return;
       try {
         const s = await api.branchState(selectedBranch);
         if (!cancelled) setBranchState(s);
@@ -177,14 +178,17 @@ export default function App() {
       ) : (
       <div className="main">
         <div className="dag-pane">
-          <div className="pane-header">
-            <span className="pane-title">ChronoDAG</span>
-            <span style={{ color: "var(--text-faint)", fontSize: 11 }}>
-              — click a branch to inspect it
-            </span>
+          <div className="pane-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <span className="pane-title">ChronoDAG</span>
+              <span style={{ color: "var(--text-faint)", fontSize: 11, marginLeft: 8 }}>
+                — click a branch to inspect it
+              </span>
+            </div>
+            
           </div>
           <DagGraph
-            branches={branches}
+            branches={branches.filter(b => !b.branch_id.startsWith("red-team/"))}
             selectedBranch={selectedBranch}
             onSelect={(branchId) => {
               setSelectedBranch(branchId);
@@ -207,6 +211,7 @@ export default function App() {
             <div className={`tab ${tab === "agents" ? "active" : ""}`} onClick={() => { setTab("agents"); setSelectedAccount(null); }}>Agents</div>
             <div className={`tab ${tab === "checkpoints" ? "active" : ""}`} onClick={() => setTab("checkpoints")}>Checkpoints</div>
             <div className={`tab ${tab === "sandbox" ? "active" : ""}`} onClick={() => setTab("sandbox")}>Sandbox</div>
+            <div className={`tab ${tab === "historical" ? "active" : ""}`} onClick={() => setTab("historical")}>Historical</div>
           </div>
           <div className="tab-body">
             {tab === "feed" && <LiveFeed events={shownEvents} />}
@@ -233,7 +238,7 @@ export default function App() {
             )}
             {tab === "sandbox" && (
               <SandboxPanel
-                branches={branches}
+                branches={branches.filter(b => !b.branch_id.startsWith("red-team/"))}
                 accounts={accounts}
                 selectedBranch={selectedBranch}
                 onForked={(id) => {
@@ -241,6 +246,37 @@ export default function App() {
                   setTab("agents");
                 }}
               />
+            )}
+            {tab === "historical" && (
+              <div style={{ padding: 16 }}>
+                <div style={{ marginBottom: 16, color: "var(--text-faint)", fontSize: 13, lineHeight: 1.4 }}>
+                  Previous Red Team sessions saved in the Postgres database. 
+                  These belong to past simulation runs.
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {branches.filter(b => b.branch_id.startsWith("red-team/")).length === 0 && (
+                    <div className="empty-hint">No historical sessions found.</div>
+                  )}
+                  {branches.filter(b => b.branch_id.startsWith("red-team/")).map(b => (
+                    <div 
+                      key={b.branch_id} 
+                      style={{ padding: 12, background: "rgba(255,255,255,0.03)", borderRadius: 6, cursor: "pointer", border: "1px solid rgba(255,255,255,0.1)" }}
+                      onClick={() => {
+                        setRedteamPrefillSessionId(b.branch_id.slice("red-team/".length));
+                        setView("redteam");
+                      }}
+                    >
+                      <div style={{ fontWeight: 600, color: "var(--accent)", marginBottom: 4 }}>{b.name}</div>
+                      <div style={{ fontSize: 12, color: "var(--text-bright)", marginBottom: 6, fontStyle: "italic" }}>
+                        "{(b as any).commit_reasoning || "No reasoning recorded"}"
+                      </div>
+                      <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                        Forked at event #{b.fork_seq_num} • Head at #{b.head_seq_num}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
         </div>

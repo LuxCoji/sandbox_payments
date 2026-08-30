@@ -71,6 +71,44 @@ class RedTeamObserver:
         self._order: list[str] = []
         self._subscribers: dict[str, list[asyncio.Queue[dict[str, object]]]] = {}
 
+        # Load historical sessions from Postgres so they can be viewed
+        try:
+            from sim.chrono.store import PostgresChronoDAG
+            import os
+            db_url = os.environ.get("FINSIM_DB_URL")
+            if db_url:
+                chrono = PostgresChronoDAG(db_url)
+                with chrono.conn.cursor() as cur:
+                    # Branches where it's red-team
+                    cur.execute("SELECT branch_id, metadata, created_at_ns FROM branches WHERE branch_id LIKE 'red-team/%' ORDER BY created_at_ns")
+                    for b_id, meta, created_at_ns in cur.fetchall():
+                        sid = b_id.replace("red-team/", "")
+                        if sid not in self._sessions:
+                            # Only committed sessions have 'origin': 'committed' in metadata, but we'll show all
+                            is_committed = (meta.get("origin") == "committed") if meta else False
+                            reasoning = meta.get("commit_reasoning", "No reasoning recorded.") if meta else "No reasoning recorded."
+                            
+                            self._sessions[sid] = RedTeamSessionState(
+                                session_id=sid,
+                                status="done",
+                                from_genesis=False,
+                                checkpoint_id=None,
+                                use_graph=False,
+                                branch_id=b_id,
+                                committed=is_committed,
+                                commit_reasoning=reasoning,
+                                # We don't have the step_log, but we can put a dummy step to explain it
+                                step_log=[{
+                                    "step": 1,
+                                    "tool_name": "Historical Record",
+                                    "reasoning": f"Historical Session loaded from DB. Full agent trace is not available, but the result is: {reasoning}"
+                                }]
+                            )
+                            self._order.append(sid)
+        except Exception as e:
+            print(f"Failed to load historical redteam sessions: {e}")
+
+
     def list_sessions(self) -> list[RedTeamSessionState]:
         return [self._sessions[sid] for sid in reversed(self._order)]
 
