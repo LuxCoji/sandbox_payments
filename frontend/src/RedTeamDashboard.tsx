@@ -7,21 +7,21 @@ import { shortId } from "./eventStyle";
 // so this table is the single source of truth reused by the step feed, the
 // tool-usage chart, and anywhere else a tool shows up.
 const TOOL_COLOR: Record<string, string> = {
-  create_account: "#6fb7ff",
-  transfer_funds: "#b78bff",
-  make_payment: "#5ef2b5",
-  inspect_account: "#8892a3",
-  commit_strategy: "#ffb454",
-  fork_branch: "#ff9ecb",
-  diff_branches: "#e6a8ff",
+  create_account: "#2fe6d1",
+  transfer_funds: "#9b7bff",
+  make_payment: "#ff8a3d",
+  inspect_account: "#8b93a3",
+  commit_strategy: "#ffd23f",
+  fork_branch: "#ff5fa8",
+  diff_branches: "#ff4757",
 };
 function toolColor(name: string): string {
-  return TOOL_COLOR[name] ?? "#4d5567";
+  return TOOL_COLOR[name] ?? "#4a5162";
 }
 
 // Distinct identity channel from tool color — provider/model bars need
 // their own fixed order so a model's color doesn't collide with a tool's.
-const PROVIDER_COLORS = ["#6fb7ff", "#5ef2b5", "#ffb454", "#b78bff", "#ff9ecb", "#8892a3"];
+const PROVIDER_COLORS = ["#2fe6d1", "#ff8a3d", "#ffd23f", "#9b7bff", "#ff5fa8", "#8b93a3"];
 
 interface Props {
   initialCheckpointId?: string | null;
@@ -182,8 +182,9 @@ export default function RedTeamDashboard({ initialCheckpointId, initialSessionId
   const successRate = live && live.step_log.length > 0 ? Math.round((successCount / live.step_log.length) * 100) : null;
 
   return (
-    <div className="rt-dashboard">
+    <div className="rt-dashboard team-red">
       <div className="rt-side">
+        <div className="rt-side-icon">🎯</div>
         <div className="callout">
           Fork off a warm checkpoint, hand an LLM the account tools, and watch it decide —
           one action at a time — what it thinks a fraud system won't catch.
@@ -271,6 +272,8 @@ export default function RedTeamDashboard({ initialCheckpointId, initialSessionId
             </div>
           ))}
         </div>
+
+        <div className="rt-side-footer credit">Spoider_Boys <i>·</i> IIT Kharagpur</div>
       </div>
 
       <div className="rt-main">

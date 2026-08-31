@@ -1,12 +1,12 @@
 export function eventColor(eventType: string): string {
-  if (eventType.startsWith("Payment")) return "#5ef2b5";
-  if (eventType.startsWith("Account")) return "#6fb7ff";
-  if (eventType.startsWith("Transfer")) return "#b78bff";
-  if (eventType.startsWith("Device")) return "#ffb454";
-  if (eventType.startsWith("Merchant")) return "#ff9ecb";
-  if (eventType.startsWith("Settlement")) return "#8892a3";
-  if (eventType.includes("Declined") || eventType.includes("Rejected") || eventType.includes("Failed")) return "#ff6d6d";
-  return "#4d5567";
+  if (eventType.startsWith("Payment")) return "#ff8a3d";
+  if (eventType.startsWith("Account")) return "#2fe6d1";
+  if (eventType.startsWith("Transfer")) return "#9b7bff";
+  if (eventType.startsWith("Device")) return "#ffd23f";
+  if (eventType.startsWith("Merchant")) return "#ff5fa8";
+  if (eventType.startsWith("Settlement")) return "#8b93a3";
+  if (eventType.includes("Declined") || eventType.includes("Rejected") || eventType.includes("Failed")) return "#ff4757";
+  return "#4a5162";
 }
 
 export function formatPaise(paise: number | undefined | null): string {

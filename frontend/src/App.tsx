@@ -5,13 +5,13 @@ import LiveFeed from "./LiveFeed";
 import AccountsPanel from "./AccountsPanel";
 import SandboxPanel from "./SandboxPanel";
 import CheckpointsPanel from "./CheckpointsPanel";
-import { FraudPanel } from "./FraudPanel";
+import BlueTeamDashboard from "./BlueTeamDashboard";
 import RedTeamDashboard from "./RedTeamDashboard";
 import Sparkline from "./Sparkline";
 import { formatSimTime, shortId } from "./eventStyle";
 
-type Tab = "feed" | "agents" | "fraud" | "checkpoints" | "sandbox" | "historical";
-type View = "sim" | "redteam";
+type Tab = "feed" | "agents" | "checkpoints" | "sandbox" | "historical";
+type View = "sim" | "redteam" | "blueteam";
 
 const MAX_FEED = 150;
 const MAX_SPARK = 40;
@@ -139,15 +139,27 @@ export default function App() {
   const shownEvents = events.filter((e) => e.branch_id === selectedBranch);
 
   return (
-    <div className={`app ${view === "redteam" ? "no-statstrip" : ""}`}>
+    <div className={`app ${view !== "sim" ? "no-statstrip" : ""}`}>
       <div className="topbar">
         <div className="brand">
-          <span className="brand-dot" />
-          FINSIM <span className="brand-sub">// CHRONO</span>
+          <svg className="brand-mark" width="32" height="20" viewBox="0 0 32 20">
+            <defs>
+              <clipPath id="mc-lens">
+                <circle cx="12" cy="10" r="7" />
+              </clipPath>
+            </defs>
+            <circle cx="12" cy="10" r="7" fill="#eb001b" />
+            <circle cx="20" cy="10" r="7" fill="#f79e1b" />
+            <circle cx="20" cy="10" r="7" fill="#ff5f00" clipPath="url(#mc-lens)" />
+          </svg>
+          <span className="brand-word">FINSIM</span>
+          <span className="brand-sub">CHRONO</span>
         </div>
+        <span className="credit">Spoider_Boys <i>·</i> IIT Kharagpur</span>
         <div className="view-switch">
           <button className={`view-btn ${view === "sim" ? "active" : ""}`} onClick={() => setView("sim")}>Simulation</button>
-          <button className={`view-btn ${view === "redteam" ? "active" : ""}`} onClick={() => setView("redteam")}>🔴 Red Team</button>
+          <button className={`view-btn view-btn-red ${view === "redteam" ? "active" : ""}`} onClick={() => setView("redteam")}>🔴 Red Team</button>
+          <button className={`view-btn view-btn-blue ${view === "blueteam" ? "active" : ""}`} onClick={() => setView("blueteam")}>🛡️ Blue Team</button>
         </div>
         <div className="topbar-spacer" />
         {view === "sim" && branchState && (
@@ -176,6 +188,8 @@ export default function App() {
           initialCheckpointId={redteamPrefillCheckpoint}
           initialSessionId={redteamPrefillSessionId}
         />
+      ) : view === "blueteam" ? (
+        <BlueTeamDashboard />
       ) : (
       <div className="main">
         <div className="dag-pane">
@@ -186,7 +200,7 @@ export default function App() {
                 — click a branch to inspect it
               </span>
             </div>
-            
+            <span className="credit">Spoider_Boys <i>·</i> IIT Kharagpur</span>
           </div>
           <DagGraph
             branches={branches}
@@ -210,7 +224,6 @@ export default function App() {
           <div className="tabs">
             <div className={`tab ${tab === "feed" ? "active" : ""}`} onClick={() => setTab("feed")}>Live Feed</div>
             <div className={`tab ${tab === "agents" ? "active" : ""}`} onClick={() => { setTab("agents"); setSelectedAccount(null); }}>Agents</div>
-            <div className={`tab ${tab === "fraud" ? "active" : ""}`} onClick={() => setTab("fraud")}>Fraud</div>
             <div className={`tab ${tab === "checkpoints" ? "active" : ""}`} onClick={() => setTab("checkpoints")}>Checkpoints</div>
             <div className={`tab ${tab === "sandbox" ? "active" : ""}`} onClick={() => setTab("sandbox")}>Sandbox</div>
             <div className={`tab ${tab === "historical" ? "active" : ""}`} onClick={() => setTab("historical")}>Historical</div>
@@ -225,7 +238,6 @@ export default function App() {
                 onSelect={setSelectedAccount}
               />
             )}
-            {tab === "fraud" && <FraudPanel />}
             {tab === "checkpoints" && (
               <CheckpointsPanel
                 branch={branches.find((b) => b.branch_id === selectedBranch)}
@@ -263,7 +275,8 @@ export default function App() {
                   {branches.filter(b => b.branch_id.startsWith("red-team/")).map(b => (
                     <div 
                       key={b.branch_id} 
-                      style={{ padding: 12, background: "rgba(255,255,255,0.03)", borderRadius: 6, cursor: "pointer", border: "1px solid rgba(255,255,255,0.1)" }}
+                      className="inspector-card"
+                      style={{ cursor: "pointer" }}
                       onClick={() => {
                         setRedteamPrefillSessionId(b.branch_id.slice("red-team/".length));
                         setView("redteam");
@@ -288,10 +301,10 @@ export default function App() {
 
       {view === "sim" && (
       <div className="statstrip">
-        <StatTile label="money supply" value={branchState ? "₹" + (branchState.money_supply_paise / 100).toLocaleString("en-IN", { maximumFractionDigits: 0 }) : "—"} data={moneyHist} color="#5ef2b5" />
-        <StatTile label="transactions" value={branchState ? branchState.tx_count.toLocaleString() : "—"} data={txHist} color="#6fb7ff" />
-        <StatTile label="accounts" value={branchState ? String(branchState.account_count) : "—"} data={[]} color="#b78bff" />
-        <StatTile label="events / branch" value={branchState ? `#${branchState.head_seq_num}` : "—"} data={eventHist} color="#ffb454" />
+        <StatTile label="money supply" value={branchState ? "₹" + (branchState.money_supply_paise / 100).toLocaleString("en-IN", { maximumFractionDigits: 0 }) : "—"} data={moneyHist} color="#ff8a3d" />
+        <StatTile label="transactions" value={branchState ? branchState.tx_count.toLocaleString() : "—"} data={txHist} color="#2fe6d1" />
+        <StatTile label="accounts" value={branchState ? String(branchState.account_count) : "—"} data={[]} color="#9b7bff" />
+        <StatTile label="events / branch" value={branchState ? `#${branchState.head_seq_num}` : "—"} data={eventHist} color="#ffd23f" />
       </div>
       )}
     </div>

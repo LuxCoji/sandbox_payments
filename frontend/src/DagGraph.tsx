@@ -9,11 +9,15 @@ interface Props {
   onCheckpointClick?: (branchId: string) => void;
 }
 
-const LANE_H = 64;
+const LANE_H = 68;
 const LEFT_PAD = 170;
 const RIGHT_PAD = 60;
 const TOP_PAD = 30;
-const COLORS = ["#5ef2b5", "#6fb7ff", "#b78bff", "#ffb454", "#ff9ecb", "#8892a3"];
+// Main is the mainline — always the brightest rail, pure white. Every
+// fork after it draws its own saturated hue from the signal set, so the
+// board reads by colour the way a real switch yard does: no two branches
+// that could be confused for one another.
+const COLORS = ["#ffffff", "#ff8a3d", "#2fe6d1", "#ffd23f", "#9b7bff", "#ff5fa8"];
 
 export default function DagGraph({ branches, selectedBranch, onSelect, onCheckpointClick }: Props) {
   const { lanes, maxSeq, colorOf } = useMemo(() => {
@@ -34,8 +38,22 @@ export default function DagGraph({ branches, selectedBranch, onSelect, onCheckpo
   return (
     <svg width={width} height={height} style={{ display: "block" }}>
       <defs>
-        <filter id="glow" x="-100%" y="-100%" width="300%" height="300%">
-          <feGaussianBlur stdDeviation="3" result="blur" />
+        {/* filterUnits="userSpaceOnUse" with explicit, generous bounds —
+            the default objectBoundingBox percentage region collapses to
+            zero on a perfectly horizontal line (zero-height bbox), which
+            silently clips the glow (and on some renderers the stroke
+            itself) to nothing. That's why "main" looked unlit: its rail
+            is the straightest, longest line in the graph — the case that
+            trips the bug hardest. */}
+        <filter id="glow" filterUnits="userSpaceOnUse" x={-30} y={-30} width={width + 60} height={height + 60}>
+          <feGaussianBlur stdDeviation="3.2" result="blur" />
+          <feMerge>
+            <feMergeNode in="blur" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+        <filter id="glow-soft" filterUnits="userSpaceOnUse" x={-30} y={-30} width={width + 60} height={height + 60}>
+          <feGaussianBlur stdDeviation="1.6" result="blur" />
           <feMerge>
             <feMergeNode in="blur" />
             <feMergeNode in="SourceGraphic" />
@@ -52,14 +70,15 @@ export default function DagGraph({ branches, selectedBranch, onSelect, onCheckpo
 
         return (
           <g key={branch.branch_id}>
-            {/* fork connector from parent lane */}
+            {/* fork connector from parent lane — the switch lead-in */}
             {branch.parent_branch_id && (
               <path
                 d={`M ${xScale(branch.fork_seq_num)} ${yOf(branch.parent_branch_id)} C ${xScale(branch.fork_seq_num) + 30} ${yOf(branch.parent_branch_id)}, ${x0 - 30} ${y}, ${x0} ${y}`}
                 stroke={color}
-                strokeWidth={1.5}
-                strokeOpacity={0.45}
+                strokeWidth={2}
+                strokeOpacity={0.55}
                 fill="none"
+                filter="url(#glow-soft)"
               />
             )}
 
@@ -74,37 +93,27 @@ export default function DagGraph({ branches, selectedBranch, onSelect, onCheckpo
                   key={`pool-${poolId}`}
                   d={`M ${poolX} ${poolY} C ${poolX + 30} ${poolY}, ${x0 - 30} ${y}, ${x0} ${y}`}
                   stroke={colorOf.get(poolId) || color}
-                  strokeWidth={1}
-                  strokeOpacity={0.4}
-                  strokeDasharray="4 2"
+                  strokeWidth={1.2}
+                  strokeOpacity={0.5}
+                  strokeDasharray="4 3"
                   fill="none"
                 />
               );
             })}
 
-            {/* lane line glow (prevents SVG zero-height bounding box clip bug) */}
-            {branch.branch_id === "main" && (
-              <line
-                x1={x0}
-                y1={y}
-                x2={x1}
-                y2={y}
-                stroke={color}
-                strokeWidth={12}
-                strokeOpacity={0.15}
-              />
-            )}
-
-            {/* lane line */}
+            {/* the rail — bright and lit; a paused/forked branch dims and
+                dashes slightly but never goes dark, it's still live track */}
             <line
               x1={x0}
               y1={y}
               x2={x1}
               y2={y}
               stroke={color}
-              strokeWidth={branch.branch_id === "main" ? (selected ? 4 : 3) : (selected ? 3 : 2)}
-              strokeOpacity={branch.live ? 1 : 0.6}
-              strokeDasharray={branch.live ? undefined : "3 4"}
+              strokeWidth={branch.branch_id === "main" ? (selected ? 4.5 : 3.5) : (selected ? 3.5 : 2.5)}
+              strokeOpacity={branch.live ? 1 : 0.85}
+              strokeDasharray={branch.live ? undefined : "5 4"}
+              strokeLinecap="round"
+              filter="url(#glow)"
             />
 
             {/* label */}
@@ -112,43 +121,51 @@ export default function DagGraph({ branches, selectedBranch, onSelect, onCheckpo
               onClick={() => onSelect(branch.branch_id)}
               style={{ cursor: "pointer" }}
             >
-              <rect x={8} y={y - 12} width={LEFT_PAD - 26} height={24} rx={6}
-                fill={selected ? "rgba(94,242,181,0.1)" : "transparent"}
-                stroke={selected ? color : "transparent"} strokeWidth={1} />
+              <rect x={8} y={y - 13} width={LEFT_PAD - 26} height={26} rx={13}
+                fill={selected ? color : "transparent"}
+                fillOpacity={selected ? 0.14 : 1}
+                stroke={selected ? color : "transparent"} strokeWidth={1.5} />
               {branch.live && (
-                <circle cx={20} cy={y} r={3.5} fill={color}>
-                  <animate attributeName="opacity" values="1;0.3;1" dur="1.6s" repeatCount="indefinite" />
+                <circle cx={20} cy={y} r={3.5} fill={color} filter="url(#glow-soft)">
+                  <animate attributeName="opacity" values="1;0.35;1" dur="1.6s" repeatCount="indefinite" />
                 </circle>
               )}
-              <text x={branch.live ? 30 : 18} y={y + 4} fontFamily="JetBrains Mono, monospace" fontSize={branch.branch_id === "main" ? 13 : 11.5}
-                fontWeight={branch.branch_id === "main" ? 800 : (selected ? 700 : 500)} fill={selected ? color : "#c7cedb"}>
+              <text x={branch.live ? 30 : 18} y={y + 4} fontFamily="Space Grotesk, sans-serif" fontSize={branch.branch_id === "main" ? 13 : 11.5}
+                fontWeight={branch.branch_id === "main" ? 700 : (selected ? 700 : 600)} fill={selected ? color : "var(--text)"}>
                 {branch.branch_id === "main" ? "MAIN BRANCH" : branch.name}
               </text>
             </g>
 
-            {/* head commit dot */}
+            {/* head commit — the live end of the rail */}
             <circle
               cx={x1}
               cy={y}
-              r={selected ? 6 : 5}
-              fill={branch.live ? color : "#0d1119"}
+              r={selected ? 7 : 5.5}
+              fill={branch.live ? color : "var(--bg)"}
               stroke={color}
               strokeWidth={2}
-              filter={branch.live ? "url(#glow)" : undefined}
+              filter={branch.live ? "url(#glow)" : "url(#glow-soft)"}
               style={{ cursor: "pointer" }}
               onClick={() => onSelect(branch.branch_id)}
             />
-            <text x={x1 + 10} y={y + 4} fontFamily="JetBrains Mono, monospace" fontSize={10} fill="#4d5567">
+            <text x={x1 + 11} y={y + 4} fontFamily="JetBrains Mono, monospace" fontSize={10} fill="var(--text-faint)">
               #{branch.head_seq_num}
             </text>
 
-            {/* fork origin dot on parent lane */}
+            {/* fork origin — two interlocking discs, parent's colour and
+                this branch's, echoing the interlocking-circles mark in
+                the topbar: a fork *is* one rail overlapping into another. */}
             {branch.parent_branch_id && (
-              <circle cx={xScale(branch.fork_seq_num)} cy={yOf(branch.parent_branch_id)} r={3.5}
-                fill="#06080c" stroke={colorOf.get(branch.parent_branch_id)} strokeWidth={2} />
+              <InterlockGlyph
+                x={xScale(branch.fork_seq_num)}
+                y={y}
+                parentY={yOf(branch.parent_branch_id)}
+                colorA={colorOf.get(branch.parent_branch_id)!}
+                colorB={color}
+              />
             )}
 
-            {/* checkpoint markers — snapshots this branch can be forked from */}
+            {/* checkpoint markers — waypoints this branch can be forked from */}
             {branch.checkpoint_seq_nums.map((seq) => (
               <g
                 key={`cp-${branch.branch_id}-${seq}`}
@@ -160,12 +177,28 @@ export default function DagGraph({ branches, selectedBranch, onSelect, onCheckpo
                 }}
               >
                 <title>{`checkpoint @ #${seq}`}</title>
-                <rect x={-4} y={-4} width={8} height={8} fill="#06080c" stroke={color} strokeWidth={1.5} />
+                <rect x={-4.5} y={-4.5} width={9} height={9} fill="var(--bg)" stroke={color} strokeWidth={2} filter="url(#glow-soft)" />
               </g>
             ))}
           </g>
         );
       })}
     </svg>
+  );
+}
+
+/** Two overlapping discs at a fork point — parent's rail colour and the
+ * new branch's, the same interlocking-circles shape as the topbar mark,
+ * because a fork is exactly that: one rail's colour overlapping another. */
+function InterlockGlyph({
+  x, y, parentY, colorA, colorB,
+}: { x: number; y: number; parentY: number; colorA: string; colorB: string }) {
+  return (
+    <g>
+      {/* waypoint back on the parent's own lane, where the split happened */}
+      <circle cx={x} cy={parentY} r={3.5} fill="var(--bg)" stroke={colorA} strokeWidth={2} filter="url(#glow-soft)" />
+      <circle cx={x - 4} cy={y} r={6} fill={colorA} opacity={0.9} filter="url(#glow-soft)" />
+      <circle cx={x + 4} cy={y} r={6} fill={colorB} opacity={0.75} filter="url(#glow-soft)" />
+    </g>
   );
 }

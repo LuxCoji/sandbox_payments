@@ -38,7 +38,7 @@ export default function AccountsPanel({ branchId, accounts, selected, onSelect }
           <div className="kv"><span className="kv-key">status</span>
             <span className={`badge ${acct.status.toLowerCase()}`}>{acct.status}</span>
           </div>
-          <div className="kv"><span className="kv-key">balance</span><span className="kv-val" style={{ color: "#5ef2b5" }}>{formatPaise(acct.balance_paise)}</span></div>
+          <div className="kv"><span className="kv-key">balance</span><span className="kv-val" style={{ color: "var(--rail-cyan)" }}>{formatPaise(acct.balance_paise)}</span></div>
           <div className="kv"><span className="kv-key">kyc_level</span><span className="kv-val">{acct.kyc_level}</span></div>
           <div className="kv"><span className="kv-key">daily_tx_count</span><span className="kv-val">{acct.daily_tx_count}</span></div>
           {acct.merchant_category_code && (
@@ -49,10 +49,10 @@ export default function AccountsPanel({ branchId, accounts, selected, onSelect }
         {history.length === 0 && <div className="empty-hint">No recorded events yet.</div>}
         {[...history].reverse().map((e) => (
           <div key={e.event_id} className="feed-item">
-            <div className="feed-bar" style={{ background: "#6fb7ff" }} />
+            <div className="feed-bar" style={{ background: "#2fe6d1" }} />
             <div>
               <div className="feed-row1">
-                <span className="feed-type" style={{ color: "#6fb7ff" }}>{e.event_type}</span>
+                <span className="feed-type" style={{ color: "#2fe6d1" }}>{e.event_type}</span>
                 <span className="feed-seq">#{e.seq_num}</span>
               </div>
             </div>
