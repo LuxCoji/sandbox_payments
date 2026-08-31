@@ -41,7 +41,12 @@ frontend/dist/
 # Red-team harness — local persona identity bookkeeping (not simulation state)
 agents/redteam/.persona_identity.json
 
-# Collected simulator traffic and trained models. Generated, large, and
-# reproducible from a seed - the recipe belongs in git, the output does not.
+# Collected simulator traffic. Generated, large, and reproducible from a seed.
 runs/
-models/
+
+# Trained models, except the shipped one. A checkpoint is generated output and
+# does not belong in git as a rule - but a branch that cannot be cloned and run
+# is worth less than the rule is worth keeping, and 11 MB is a price worth
+# paying for that. Models a retrain produces stay out.
+models/*
+!models/card.pt

@@ -1160,3 +1160,102 @@ def test_the_red_team_runs_defended_by_default():
     assert "enable_risk=not args.no_risk" in text, (
         "the red-team runner must enable the rails unless asked not to")
     assert "--no-risk" in text, "there must be a way to run undefended on purpose"
+
+
+# --- retraining, and the gate a candidate has to clear -----------------------
+
+def test_a_candidate_must_beat_the_live_model_on_the_same_holdout(tmp_path):
+    """Comparing against a stored number compares measurements, not models.
+
+    The recall on a Version came from a different period against a different
+    vocabulary. A candidate gated on that can win because the traffic moved.
+    """
+    from risk.registry import MIN_IMPROVEMENT, Registry
+
+    registry = Registry.load(tmp_path)
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"not a real checkpoint")
+
+    first = registry.consider(weights, candidate_recall=0.40, rows=5000, fraud=200)
+    assert first.promoted, "the first model has nothing to beat"
+
+    # Scored 0.60 in its own run, but 0.41 on this holdout - barely above the
+    # live model's 0.405 on the same rows. That is noise, not an improvement.
+    close = registry.consider(weights, candidate_recall=0.41, rows=5000,
+                              fraud=200, live_recall=0.405)
+    assert not close.promoted
+    assert "did not beat" in close.reason
+
+    clear = registry.consider(weights, candidate_recall=0.50, rows=5000,
+                              fraud=200, live_recall=0.405)
+    assert clear.promoted
+    assert clear.replaced_version == 1
+
+
+def test_a_rejected_candidate_is_kept(tmp_path):
+    """Evidence about what does not work, so it is not retried blind."""
+    from risk.registry import Registry
+
+    registry = Registry.load(tmp_path)
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"x")
+
+    registry.consider(weights, 0.40, rows=5000, fraud=200)
+    registry.consider(weights, 0.401, rows=5000, fraud=200, live_recall=0.40)
+
+    assert len(registry.versions) == 2
+    assert (tmp_path / "card-v2.pt").exists(), "the rejected candidate was deleted"
+    assert Registry.load(tmp_path).live.version == 1, "the wrong model went live"
+
+
+def test_rollback_restores_the_previous_model(tmp_path):
+    """A holdout is a period, not the future - a good promotion can still be wrong."""
+    from risk.registry import Registry
+
+    registry = Registry.load(tmp_path)
+    for i, (recall, live) in enumerate([(0.40, None), (0.55, 0.40)]):
+        weights = tmp_path / f"w{i}.pt"
+        weights.write_bytes(f"model-{i}".encode())
+        registry.consider(weights, recall, rows=5000, fraud=200, live_recall=live)
+
+    assert registry.live.version == 2
+    previous = registry.rollback()
+
+    assert previous.version == 1
+    assert registry.live_path.read_bytes() == b"model-0"
+    assert Registry.load(tmp_path).live.version == 1
+
+
+def test_rollback_refuses_when_there_is_nothing_to_go_back_to(tmp_path):
+    from risk.registry import Registry
+
+    registry = Registry.load(tmp_path)
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"x")
+    registry.consider(weights, 0.4, rows=5000, fraud=200)
+
+    assert registry.rollback() is None
+
+
+def test_retraining_refuses_a_sample_too_small_to_measure(tmp_path):
+    """Replacing a working model on a handful of frauds is a coin flip."""
+    import json
+
+    from risk.retrain import NotEnoughData, retrain
+
+    traffic = tmp_path / "traffic.jsonl"
+    with traffic.open("w", encoding="utf-8") as handle:
+        for i in range(50):
+            handle.write(json.dumps({
+                "account_id": "a", "tx_id": f"t{i}", "is_fraud": 0,
+                "observation": _row(i, False)["observation"]}) + "\n")
+
+    with pytest.raises(NotEnoughData, match="sampling noise"):
+        retrain(traffic, tmp_path)
+
+
+def test_recall_on_an_empty_holdout_is_zero_not_a_crash():
+    """A period with no fraud says nothing, and must not promote anything."""
+    from risk.registry import recall_at
+
+    assert recall_at(np.zeros(100, dtype=int), np.random.rand(100)) == 0.0

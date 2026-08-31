@@ -265,6 +265,37 @@ stamped the default shape onto non-default weights; and two `dict(x or default)`
 defaults where `{}` silently became the full default - the same class of bug as
 the `AccountHistory` one, with a dict.
 
+## The shipped model, and the retrain button
+
+`models/card.pt` is committed - 12 MB - so the branch can be cloned and run
+without training anything first. A checkpoint is generated output and does not
+belong in git as a rule, but a branch nobody can run is worth less than the rule
+is worth keeping.
+
+**The wire rail has no model and needs none.** Cycles, pass-through ratios,
+burst counts and owner aggregation are computed from the graph, so that rail
+works on a fresh clone with nothing downloaded.
+
+The dashboard has a **Retrain** button. It does **not** make the model learn
+continuously from live traffic, and that is deliberate:
+
+**A model that learns from its own decisions can be taught.** If "allowed" is
+treated as "genuine", every fraud that gets through becomes a training example
+saying that shape is fine - so an attacker who finds one working attack widens
+it by repetition, and the system is trained by the person it is defending
+against.
+
+**A blocked transaction never reveals whether it was fraud.** The model would
+only ever learn from what it let through, biasing it toward whatever it already
+believed - and that drift is invisible, because the loss falls and the flag rate
+holds while recall decays.
+
+So the button retrains a candidate on accumulated *labelled* traffic, scores the
+candidate **and the live model** on a period neither trained on, and promotes
+only if the candidate wins by more than a point. Rejected candidates are kept -
+they are evidence about what does not work. Every promotion can be rolled back,
+because a holdout is a period rather than the future.
+
 ## What is still to do
 
 1. Measure against the red team - the only test that is not marking its own

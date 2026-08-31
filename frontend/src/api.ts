@@ -107,6 +107,12 @@ async function j<T>(res: Response): Promise<T> {
 }
 
 export const api = {
+  startRetrain: () =>
+    fetch(`${BASE}/risk/retrain`, { method: "POST" }).then((r) => j<{ status: string }>(r)),
+  retrainStatus: (signal?: AbortSignal) =>
+    fetch(`${BASE}/risk/retrain`, { signal }).then((r) => j<RetrainStatus>(r)),
+  rollbackModel: () =>
+    fetch(`${BASE}/risk/rollback`, { method: "POST" }).then((r) => j<unknown>(r)),
   riskSummary: (signal?: AbortSignal) =>
     fetch(`${BASE}/risk/summary`, { signal }).then((r) => j<RiskSummary>(r)),
   riskCases: (signal?: AbortSignal) =>
@@ -203,4 +209,38 @@ export type RiskCase = {
   source_account_id: string;
   destination_account_id: string;
   sim_time_ns: number;
+};
+
+/** A model version and what it measured when it was considered. */
+export type ModelVersion = {
+  version: number;
+  trained_at: string;
+  rows: number;
+  fraud: number;
+  recall_at_2pct: number;
+  promoted: boolean;
+  reason: string;
+};
+
+/** Where the last retrain got to. "declined" is a success, not a failure:
+ *  it means the candidate did not beat what is already live. */
+export type RetrainStatus = {
+  status: "idle" | "running" | "done" | "declined" | "failed";
+  error: string | null;
+  result: {
+    promoted: boolean;
+    reason: string;
+    version: number;
+    candidate_recall: number;
+    live_recall_on_same_holdout: number | null;
+    rows: number;
+    fraud: number;
+  } | null;
+  registry: {
+    versions: number;
+    live_version: number | null;
+    live_recall: number | null;
+    can_rollback: boolean;
+    history: ModelVersion[];
+  };
 };

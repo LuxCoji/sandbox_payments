@@ -542,3 +542,58 @@ body {
   background: rgba(95, 168, 211, 0.15);
   color: #5fa8d3;
 }
+
+.fraud-model {
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.fraud-model-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.fraud-model-head button {
+  margin-left: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  cursor: pointer;
+}
+
+.fraud-model-head button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.fraud-note {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  opacity: 0.6;
+  max-width: 70ch;
+}
+
+.fraud-outcome {
+  margin-top: 10px;
+  padding: 8px 11px;
+  border-radius: 3px;
+  font-size: 12px;
+  background: rgba(76, 154, 90, 0.12);
+  border: 1px solid rgba(76, 154, 90, 0.5);
+}
+
+.fraud-outcome.bad {
+  background: rgba(210, 80, 79, 0.12);
+  border-color: rgba(210, 80, 79, 0.5);
+}
