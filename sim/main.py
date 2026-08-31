@@ -21,6 +21,23 @@ from sim.scheduler.rng import DeterministicRNG
 logger = get_logger("finsim.cli")
 
 
+def _build_risk(config: SimConfig):
+    """Construct the fraud rails, or None when they are switched off.
+
+    This function is the *only* place the simulation touches the risk package,
+    and it is the composition root - so `sim` still has no dependency on
+    `risk`. The engine sees a `RiskScorer` protocol and nothing more, which is
+    what the import-linter contract in pyproject.toml enforces.
+    """
+    if not config.enable_risk:
+        return None
+
+    from risk import FraudRiskEngine
+
+    logger.info("fraud detection enabled")
+    return FraudRiskEngine()
+
+
 def _require_db_url(config: SimConfig) -> str:
     if not config.db_url:
         raise SystemExit("No database URL: set FINSIM_DB_URL in the environment/.env or pass db_url on SimConfig")
@@ -34,7 +51,8 @@ def build_simulation(config: SimConfig) -> tuple[WorldEngineImpl, ToolGatewayImp
     # Chrono is wired into the engine so execute_command() persists every
     # emitted event via the Emit -> Append -> Apply pipeline (see engine.py).
     chrono = PostgresChronoDAG(_require_db_url(config))
-    engine = WorldEngineImpl(env=env, rng=rng, chrono=chrono)
+    engine = WorldEngineImpl(env=env, rng=rng, chrono=chrono,
+                             risk=_build_risk(config))
 
     registry = ToolRegistry()
     rate_limiter = RateLimiter()
@@ -99,6 +117,7 @@ def build_simulation_for_branch(
     engine = WorldEngineImpl(
         env=env, rng=rng, branch_id=branch_id, chrono=chrono,
         seq_num=replay_ctx.checkpoint.event_number,
+        risk=_build_risk(config),
     )
     engine.restore_full_snapshot_bytes(replay_ctx.checkpoint.aggregate_snapshot)
 

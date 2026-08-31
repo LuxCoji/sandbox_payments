@@ -112,7 +112,78 @@ class DeviceStatus(enum.Enum):
     LOST = "LOST"
 
 
+class RiskAction(enum.Enum):
+    """What a risk assessment asks the engine to do.
+
+    Only BLOCK changes what the engine emits. STEP_UP and REVIEW are recorded
+    by the risk system itself and leave the payment flow untouched, because
+    neither is a decision the engine is entitled to make on a model's say-so.
+    """
+    ALLOW = "ALLOW"
+    STEP_UP = "STEP_UP"      # ask the customer to confirm; card rail only
+    BLOCK = "BLOCK"          # refuse the transaction; card rail only
+    REVIEW = "REVIEW"        # queue for a human; never stops the money
+
+
 # ── Immutable View Dataclasses ────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class RiskContext:
+    """Everything a risk model is allowed to see about one transaction.
+
+    Deliberately narrow. A scorer receives this and nothing else - no engine
+    handle, no account objects, no way to reach back into simulation state.
+    Anything a model needs beyond a single transaction (a card's history, an
+    account graph) it must accumulate from the stream of these it has already
+    been given, which is exactly the constraint a real scoring service runs
+    under.
+    """
+
+    tx_id: str
+    tx_type: TransactionType
+    actor_id: str
+    source_account_id: str
+    destination_account_id: str
+    amount_paise: int
+    sim_time_ns: float
+    gateway_id: str | None = None
+    device_type: DeviceType | None = None
+    source_account_type: AccountType | None = None
+    source_kyc_level: int = 0
+    destination_account_type: AccountType | None = None
+
+
+@dataclass(frozen=True)
+class RiskDecision:
+    """One assessment. `score` is the model's probability, not a verdict."""
+
+    action: RiskAction
+    score: float
+    rail: str                # "card" or "wire"
+    reason: str = ""
+
+    @classmethod
+    def allow(cls, rail: str, score: float = 0.0, reason: str = "") -> RiskDecision:
+        return cls(action=RiskAction.ALLOW, score=score, rail=rail, reason=reason)
+
+
+@runtime_checkable
+class RiskScorer(Protocol):
+    """A risk model the engine may consult before authorising money movement.
+
+    Injected, never imported: `sim` must not depend on the risk package, so the
+    composition root wires an implementation in and the engine only ever sees
+    this protocol. With no scorer wired, the engine's behaviour and its state
+    hash are byte-for-byte what they were before risk scoring existed, which is
+    what keeps every existing replay and determinism test valid.
+
+    `assess` must not raise. A scorer that fails should return ALLOW - a broken
+    model must not become an outage that declines every payment in the system.
+    """
+
+    def assess(self, context: RiskContext) -> RiskDecision:
+        ...
 
 @dataclass(frozen=True)
 class AccountSnapshot:
