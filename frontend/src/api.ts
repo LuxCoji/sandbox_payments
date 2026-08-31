@@ -232,8 +232,10 @@ export type RiskCase = {
   source_account_id: string;
   destination_account_id: string;
   sim_time_ns: number;
-  /** Where the money went after this leg. Empty on the card rail. */
-  chain: ChainHop[];
+  /** Where the money went after this leg. Empty on the card rail, and absent
+   *  entirely from a server older than chain tracing - which is why it is
+   *  optional rather than an empty array. */
+  chain?: ChainHop[];
 };
 
 /** A reviewer's answer to a case. The reviewer's name is required - "who

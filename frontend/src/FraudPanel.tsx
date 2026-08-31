@@ -126,28 +126,28 @@ export function FraudPanel() {
       )}
 
       <div className="fraud-tiles">
-        <Tile n={summary.scored.toLocaleString()} k="scored" />
-        <Tile n={summary.flagged.toLocaleString()} k="flagged" />
-        <Tile n={`${(summary.flag_rate * 100).toFixed(2)}%`} k="flag rate" />
-        <Tile n={summary.blocked.toLocaleString()} k="blocked" />
-        <Tile n={summary.review.toLocaleString()} k="for review" />
-        <Tile n={summary.accounts_tracked.toLocaleString()} k="accounts" />
+        <Tile n={count(summary.scored)} k="scored" />
+        <Tile n={count(summary.flagged)} k="flagged" />
+        <Tile n={`${((summary.flag_rate ?? 0) * 100).toFixed(2)}%`} k="flag rate" />
+        <Tile n={count(summary.blocked)} k="blocked" />
+        <Tile n={count(summary.review)} k="for review" />
+        <Tile n={count(summary.accounts_tracked)} k="accounts" />
       </div>
 
       <div className="fraud-model">
         <div className="fraud-model-head">
           <span>
-            {retrain?.registry.live_version
+            {retrain?.registry?.live_version
               ? `Model v${retrain.registry.live_version}`
               : "Model: the shipped one"}
-            {retrain?.registry.live_recall != null &&
+            {retrain?.registry?.live_recall != null &&
               ` · caught ${(retrain.registry.live_recall * 100).toFixed(1)}% at a 2% flag rate`}
           </span>
           <span>
             <button onClick={startRetrain} disabled={busy || running}>
               {running ? "Retraining…" : "Retrain on collected traffic"}
             </button>
-            {retrain?.registry.can_rollback && (
+            {retrain?.registry?.can_rollback && (
               <button onClick={rollback} disabled={busy || running}>
                 Roll back
               </button>
@@ -177,7 +177,7 @@ export function FraudPanel() {
           </div>
         )}
 
-        {retrain && retrain.registry.history.length > 0 && (
+        {(retrain?.registry?.history?.length ?? 0) > 0 && (
           <table className="fraud-cases">
             <thead>
               <tr>
@@ -188,7 +188,7 @@ export function FraudPanel() {
               </tr>
             </thead>
             <tbody>
-              {retrain.registry.history.map((v) => (
+              {retrain!.registry.history.map((v) => (
                 <tr key={v.version}>
                   <td className="mono">v{v.version}</td>
                   <td className="mono">
@@ -247,17 +247,17 @@ export function FraudPanel() {
                 <td className="mono">{formatPaise(c.amount_paise)}</td>
                 <td className="reason">
                   {c.reason}
-                  {c.chain.length > 0 && (
+                  {(c.chain?.length ?? 0) > 0 && (
                     <button
                       className="link"
                       onClick={() => setOpenCase(openCase === c.tx_id ? null : c.tx_id)}
                     >
                       {openCase === c.tx_id
                         ? "hide the route"
-                        : `follow the money (${c.chain.length} hop${c.chain.length > 1 ? "s" : ""})`}
+                        : `follow the money (${c.chain!.length} hop${c.chain!.length > 1 ? "s" : ""})`}
                     </button>
                   )}
-                  {openCase === c.tx_id && <Chain hops={c.chain} />}
+                  {openCase === c.tx_id && <Chain hops={c.chain ?? []} />}
                   <div className="case-actions">
                     <button disabled={busy} onClick={() => act("freeze", c.tx_id)}>
                       Request freeze
@@ -309,6 +309,12 @@ function Chain({ hops }: { hops: ChainHop[] }) {
       </div>
     </div>
   );
+}
+
+/** A count that may not have arrived. An older server, a renamed field or a
+ *  partial response should render "—", not take the tab down. */
+function count(n: number | undefined): string {
+  return n == null ? "—" : n.toLocaleString();
 }
 
 function Tile({ n, k }: { n: string; k: string }) {
