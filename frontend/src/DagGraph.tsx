@@ -63,6 +63,25 @@ export default function DagGraph({ branches, selectedBranch, onSelect, onCheckpo
               />
             )}
 
+            {/* pool connectors */}
+            {branch.pool_from_branch_ids?.map((poolId) => {
+              const pooledBranch = branches.find((b) => b.branch_id === poolId);
+              if (!pooledBranch) return null;
+              const poolY = yOf(poolId);
+              const poolX = xScale(pooledBranch.head_seq_num);
+              return (
+                <path
+                  key={`pool-${poolId}`}
+                  d={`M ${poolX} ${poolY} C ${poolX + 30} ${poolY}, ${x0 - 30} ${y}, ${x0} ${y}`}
+                  stroke={colorOf.get(poolId) || color}
+                  strokeWidth={1}
+                  strokeOpacity={0.4}
+                  strokeDasharray="4 2"
+                  fill="none"
+                />
+              );
+            })}
+
             {/* lane line glow (prevents SVG zero-height bounding box clip bug) */}
             {branch.branch_id === "main" && (
               <line

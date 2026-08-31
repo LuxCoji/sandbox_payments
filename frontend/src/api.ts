@@ -9,6 +9,7 @@ export interface BranchNode {
   seed_offset: number;
   created_at_ns: number;
   checkpoint_seq_nums: number[];
+  pool_from_branch_ids?: string[];
 }
 
 export interface Checkpoint {

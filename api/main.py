@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from pathlib import Path
+import time
 SERVER_RUN_ID = uuid.uuid4().hex
 
 import dataclasses
@@ -93,6 +94,8 @@ def _get_redteam_chrono():
     return _redteam_chrono_conn
 
 
+SERVER_START_TIME_WALL = time.time()
+
 def _list_redteam_branches() -> list[dict]:
     chrono = _get_redteam_chrono()
     if chrono is None:
@@ -102,7 +105,7 @@ def _list_redteam_branches() -> list[dict]:
         # Join with checkpoints to find the exact event number this branch was forked from,
         # and the metadata to see which demo checkpoint it originated from.
         cur.execute(
-            '''SELECT b.branch_id, b.head_seq_num, b.created_at_ns, c.event_number, c.metadata
+            '''SELECT b.branch_id, b.head_seq_num, b.created_at_ns, c.event_number, c.metadata, c.branch_id, b.metadata
                FROM branches b
                LEFT JOIN checkpoints c ON b.parent_checkpoint_id = c.checkpoint_id
                WHERE b.branch_id LIKE 'red-team/%' ORDER BY b.created_at_ns'''
@@ -115,14 +118,25 @@ def _list_redteam_branches() -> list[dict]:
         for branch_id, event_number in cur.fetchall():
             checkpoints_by_branch.setdefault(branch_id, []).append(event_number)
 
-    demo_checkpoints = set(_session().dag._checkpoints_by_id.keys())
+    out = []
+    for branch_id, head_seq_num, created_at_ns, fork_seq_num, c_meta, c_branch_id, b_meta in rows:
+        if not b_meta or b_meta.get("created_at_wall", 0) < SERVER_START_TIME_WALL:
+            continue
 
-    return [
-        {
+        parent_branch_id = None
+        if c_branch_id:
+            if c_branch_id.startswith("demo-export/"):
+                if c_meta and c_meta.get("server_run_id") == SERVER_RUN_ID:
+                    origin_cp_id = c_meta.get("origin_checkpoint")
+                    if origin_cp_id in _session().dag._checkpoints_by_id:
+                        parent_branch_id = _session().dag._checkpoints_by_id[origin_cp_id].branch_id
+            else:
+                parent_branch_id = c_branch_id
+
+        out.append({
             "branch_id": branch_id,
             "name": f"🔴 {branch_id.removeprefix('red-team/')}",
-            # Only attach to 'main' if the origin checkpoint actually exists in THIS session's memory
-            "parent_branch_id": "main" if (c_meta and c_meta.get("server_run_id") == SERVER_RUN_ID) else None,
+            "parent_branch_id": parent_branch_id,
             "parent_checkpoint_id": None,
             "fork_seq_num": fork_seq_num or 0,
             "head_seq_num": head_seq_num,
@@ -130,10 +144,10 @@ def _list_redteam_branches() -> list[dict]:
             "seed_offset": 0,
             "created_at_ns": created_at_ns,
             "checkpoint_seq_nums": sorted(checkpoints_by_branch.get(branch_id, [])),
-            "commit_reasoning": c_meta.get("commit_reasoning", "No reasoning recorded") if c_meta else "No reasoning recorded"
-        }
-        for branch_id, head_seq_num, created_at_ns, fork_seq_num, c_meta in rows
-    ]
+            "commit_reasoning": c_meta.get("commit_reasoning", "No reasoning recorded") if c_meta else "No reasoning recorded",
+            "pool_from_branch_ids": c_meta.get("pool_from_branch_ids", []) if c_meta else [],
+        })
+    return out
 
 
 @app.get("/api/branches/{branch_id}/state")
