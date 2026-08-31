@@ -189,7 +189,7 @@ export default function App() {
             
           </div>
           <DagGraph
-            branches={branches.filter(b => !b.branch_id.startsWith("red-team/") || b.parent_branch_id === "main")}
+            branches={branches}
             selectedBranch={selectedBranch}
             onSelect={(branchId) => {
               setSelectedBranch(branchId);

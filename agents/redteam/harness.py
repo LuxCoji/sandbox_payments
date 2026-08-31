@@ -243,14 +243,16 @@ def _pool_notes_from_branches(chrono: PostgresChronoDAG, branch_ids: list[str]) 
     return notes, patterns
 
 
-def _fork_session_branch(sim_config: SimConfig, checkpoint_id: str, session_id: str) -> tuple[str, str | None]:
+import time
+
+def _fork_session_branch(sim_config: SimConfig, checkpoint_id: str, session_id: str, pool_from_branch_ids: list[str] | None = None) -> tuple[str, str | None]:
     if not sim_config.db_url:
         raise SystemExit("No database URL: set FINSIM_DB_URL in the environment/.env")
     chrono = PostgresChronoDAG(sim_config.db_url)
     branch = chrono.fork(
         checkpoint_id=checkpoint_id,
         branch_id=f"red-team/{session_id}",
-        metadata={"origin": "agent_experiment"},
+        metadata={"origin": "agent_experiment", "pool_from_branch_ids": pool_from_branch_ids or [], "created_at_wall": time.time()},
     )
     return str(branch.branch_id), branch.parent_branch_id
 
@@ -286,7 +288,9 @@ def _prepare_session(
     elif warmup_checkpoint_id is None:
         raise ValueError("warmup_checkpoint_id is required unless from_genesis=True")
 
-    branch_id, parent_branch_id = _fork_session_branch(sim_config, warmup_checkpoint_id, session_id)
+    branch_id, parent_branch_id = _fork_session_branch(
+        sim_config, warmup_checkpoint_id, session_id, pool_from_branch_ids
+    )
     engine, gateway, chrono = build_simulation_for_branch(sim_config, branch_id)
     pool_ids = [*([parent_branch_id] if parent_branch_id else []), *(pool_from_branch_ids or [])]
     # de-dupe, keep order
