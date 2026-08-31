@@ -17,6 +17,7 @@ import dataclasses
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -418,3 +419,39 @@ async def stream(ws: WebSocket):
         pass
     finally:
         s.dag.unsubscribe(q)
+
+
+# ── Fraud detection ───────────────────────────────────────────────────────
+#
+# The rails watch the live branch and expose two things: what they have seen,
+# and what they have flagged. Read-only here - a freeze is a separate action
+# with a named reviewer behind it, and putting it on an unauthenticated GET
+# would make it a one-click way to freeze someone's account.
+
+
+@app.get("/api/risk/summary")
+async def risk_summary():
+    """Counts, flag rate, and whether a trained card model is actually loaded."""
+    return _session().risk_summary()
+
+
+@app.get("/api/risk/cases")
+async def risk_cases(limit: int = 100):
+    """Open cases, newest first. Each carries the evidence that raised it."""
+    return {"cases": _session().risk_cases(limit=limit)}
+
+
+@app.get("/api/risk/console", response_class=HTMLResponse)
+async def risk_console():
+    """The whole queue as a page, for a reviewer who wants to read rather than poll."""
+    from risk.console import render
+
+    session = _session()
+    summary = session.risk_summary()
+    if not summary.get("enabled"):
+        return HTMLResponse("<p>Fraud detection is not enabled for this session.</p>")
+
+    cases = session.risk.cases[-200:][::-1] if session.risk else []
+    return HTMLResponse(render(
+        summary, cases, card_model_loaded=summary.get("card_model_loaded", False),
+        run_label="live session"))
