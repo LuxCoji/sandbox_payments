@@ -565,6 +565,15 @@ class WorldEngineImpl:
             ))
             return events
 
+        inbound_limit_reason = dst.check_inbound_daily_limit(command.amount_paise, self.sim_time_ns)
+        if inbound_limit_reason:
+            events.append(self._create_event(
+                TransferRejected, actor_id=command.actor_id,
+                source_account_id=src.account_id, target_account_id=dst.account_id,
+                amount_paise=command.amount_paise, reason_code="LIMIT_EXCEEDED", detail=inbound_limit_reason
+            ))
+            return events
+
         tx_id = self._next_tx_id()
 
         # The wire rail sees every transfer and stops none of them. Money
@@ -623,6 +632,11 @@ class WorldEngineImpl:
                 PaymentDeclined, actor_id=command.actor_id, tx_id=tx_id,
                 reason="Insufficient funds", decline_code="INSUFFICIENT_FUNDS"
             ))
+        elif (dst := self._accounts.get(command.target_account_id or "")) and (inbound_limit_reason := dst.check_inbound_daily_limit(command.amount_paise, self.sim_time_ns)):
+            events.append(self._create_event(
+                PaymentDeclined, actor_id=command.actor_id, tx_id=tx_id,
+                reason=inbound_limit_reason, decline_code="LIMIT_EXCEEDED"
+            ))
         elif (risk := self._assess_risk(command, tx_id, src)).action is RiskAction.BLOCK:
             # Risk is consulted last, after ownership and funds. A payment that
             # was going to fail anyway must not be scored: it would teach the
@@ -650,6 +664,15 @@ class WorldEngineImpl:
 
         dst = self._accounts.get(command.target_account_id)
         if not dst:
+            return events
+
+        inbound_limit_reason = dst.check_inbound_daily_limit(command.amount_paise, self.sim_time_ns)
+        if inbound_limit_reason:
+            events.append(self._create_event(
+                TransferRejected, actor_id=command.actor_id,
+                source_account_id="CASH_ENTITY", target_account_id=dst.account_id,
+                amount_paise=command.amount_paise, reason_code="LIMIT_EXCEEDED", detail=inbound_limit_reason
+            ))
             return events
 
         tx_id = self._next_tx_id()
@@ -713,6 +736,15 @@ class WorldEngineImpl:
 
         dst = self._accounts.get(command.target_account_id)
         if not dst:
+            return events
+
+        inbound_limit_reason = dst.check_inbound_daily_limit(command.amount_paise, self.sim_time_ns)
+        if inbound_limit_reason:
+            events.append(self._create_event(
+                TransferRejected, actor_id=command.actor_id,
+                source_account_id="EXTERNAL", target_account_id=dst.account_id,
+                amount_paise=command.amount_paise, reason_code="LIMIT_EXCEEDED", detail=inbound_limit_reason
+            ))
             return events
 
         tx_id = self._next_tx_id()

@@ -66,6 +66,8 @@ class Account:
         "created_at_ns",
         "daily_tx_count",
         "daily_tx_volume_paise",
+        "daily_inbound_tx_count",
+        "daily_inbound_volume_paise",
         "last_tx_day",
         "linked_device_ids",
         "merchant_category_code",
@@ -83,6 +85,8 @@ class Account:
         self.created_at_ns = event.sim_time_ns
         self.daily_tx_count = 0
         self.daily_tx_volume_paise = 0
+        self.daily_inbound_tx_count = 0
+        self.daily_inbound_volume_paise = 0
         self.last_tx_day = int(event.sim_time_ns // NANOS_PER_DAY)
         self.linked_device_ids: set[str] = set()
         self.merchant_category_code: str | None = None
@@ -107,6 +111,16 @@ class Account:
         simulated_volume = 0 if current_day > self.last_tx_day else self.daily_tx_volume_paise
         if simulated_volume + amount_paise > limit:
             return f"Exceeds daily limit of {limit}"
+        return None
+
+    def check_inbound_daily_limit(self, amount_paise: int, sim_time_ns: float) -> str | None:
+        limit = self.daily_limit_paise()
+        if limit is None:
+            return None
+        current_day = int(sim_time_ns // NANOS_PER_DAY)
+        simulated_volume = 0 if current_day > self.last_tx_day else self.daily_inbound_volume_paise
+        if simulated_volume + amount_paise > limit:
+            return f"Exceeds inbound daily limit of {limit}"
         return None
 
     def can_debit(self, amount_paise: int) -> str | None:
@@ -139,6 +153,8 @@ class Account:
                 account_id=self.account_id,
                 old_daily_tx_count=self.daily_tx_count,
                 old_daily_tx_volume_paise=self.daily_tx_volume_paise,
+                old_daily_inbound_tx_count=self.daily_inbound_tx_count,
+                old_daily_inbound_volume_paise=self.daily_inbound_volume_paise,
             )
         return None
 
@@ -152,6 +168,8 @@ class Account:
 
         if isinstance(event, AccountCredited):
             self.balance_paise += event.amount_paise
+            self.daily_inbound_tx_count += 1
+            self.daily_inbound_volume_paise += event.amount_paise
         elif isinstance(event, AccountDebited):
             self.balance_paise -= event.amount_paise
             self.daily_tx_count += 1
@@ -167,6 +185,8 @@ class Account:
         elif isinstance(event, DailyCountersReset):
             self.daily_tx_count = 0
             self.daily_tx_volume_paise = 0
+            self.daily_inbound_tx_count = 0
+            self.daily_inbound_volume_paise = 0
             self.last_tx_day = int(event.sim_time_ns // NANOS_PER_DAY)
 
     def to_snapshot(self) -> AccountSnapshot:
@@ -179,6 +199,8 @@ class Account:
             created_at=self.created_at_ns,
             daily_tx_count=self.daily_tx_count,
             daily_tx_volume_paise=self.daily_tx_volume_paise,
+            daily_inbound_tx_count=self.daily_inbound_tx_count,
+            daily_inbound_volume_paise=self.daily_inbound_volume_paise,
             linked_device_ids=tuple(sorted(self.linked_device_ids)),
             owner_id=self.owner_id,
             merchant_category_code=self.merchant_category_code,
@@ -194,5 +216,7 @@ class Account:
             "kyc_level": self.kyc_level,
             "daily_tx_count": self.daily_tx_count,
             "daily_tx_volume_paise": self.daily_tx_volume_paise,
+            "daily_inbound_tx_count": self.daily_inbound_tx_count,
+            "daily_inbound_volume_paise": self.daily_inbound_volume_paise,
             "overdraft_limit_paise": self.overdraft_limit_paise,
         }

@@ -215,6 +215,8 @@ class AccountSnapshot:
     created_at: float                        # sim time nanoseconds
     daily_tx_count: int
     daily_tx_volume_paise: int
+    daily_inbound_tx_count: int
+    daily_inbound_volume_paise: int
     linked_device_ids: tuple[str, ...]
     owner_id: str = ""                       # real ID (own view) or pseudonymous hash (masked view)
     merchant_category_code: str | None = None  # MCC, only for MERCHANT accounts

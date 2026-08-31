@@ -54,7 +54,10 @@ def _create_mock_world_view(
             created_at=0.0,
             daily_tx_count=0,
             daily_tx_volume_paise=0,
+            daily_inbound_tx_count=0,
+            daily_inbound_volume_paise=0,
             linked_device_ids=(f"dev-{actor_id[:8]}",),
+            owner_id=actor_id,
         ),
     )
 
