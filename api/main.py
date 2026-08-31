@@ -451,7 +451,8 @@ async def risk_console():
     if not summary.get("enabled"):
         return HTMLResponse("<p>Fraud detection is not enabled for this session.</p>")
 
-    cases = session.risk.cases[-200:][::-1] if session.risk else []
+    # `cases` is a bounded deque, which does not slice.
+    cases = list(session.risk.cases)[-200:][::-1] if session.risk else []
     return HTMLResponse(render(
         summary, cases, card_model_loaded=summary.get("card_model_loaded", False),
         run_label="live session"))

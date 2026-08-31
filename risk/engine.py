@@ -23,6 +23,7 @@ the engine knows about it.
 from __future__ import annotations
 
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 
 from risk.card.history import AccountHistory
@@ -47,6 +48,11 @@ WIRE_TYPES = frozenset({TransactionType.TRANSFER})
 # every transaction, because a sweep over every account per payment would make
 # scoring cost grow with the size of the simulation.
 EVICT_EVERY = 10_000
+
+# The console and the API read the most recent hundred or two. Older cases are
+# in the decision log if a reviewer acted on them, so keeping every one forever
+# retains memory nothing reads.
+MAX_CASES = 5_000
 
 
 @dataclass
@@ -78,6 +84,7 @@ class Counters:
     blocked: int = 0
     review: int = 0
     unscored: int = 0
+    failed: int = 0
     by_rail: dict[str, int] = field(default_factory=dict)
 
 
@@ -98,10 +105,31 @@ class FraudRiskEngine:
         # caller's object and silently build a second, separate history.
         self.history = AccountHistory() if history is None else history
         self.card = card_scorer or UntrainedCardScorer(history=self.history)
+        # A scorer arriving with its own history detaches every count from what
+        # is actually being scored: `_record_traffic` reads this object, the
+        # summary reports its size, and the sweep prunes it - while the scorer
+        # writes somewhere else. Nothing about that failure is visible, so it is
+        # refused rather than trusted to the caller.
+        scorer_history = getattr(self.card, "history", None)
+        if scorer_history is not None and scorer_history is not self.history:
+            raise ValueError(
+                "the card scorer holds a different AccountHistory than the "
+                "engine. Pass the same object to both, or pass only the "
+                "scorer - two histories means the traffic recorder, the "
+                "summary and the eviction sweep all read the wrong one.")
         self.wire = wire_scorer or WireScorer(
             graph=TransferGraph() if graph is None else graph)
         self.counters = Counters()
-        self.cases: list[Case] = []
+        # Bounded. The live API session runs indefinitely and reads only the
+        # most recent hundred, so an unbounded list is retained memory that
+        # nothing looks at - and every other store in this package is bounded.
+        self.cases: deque[Case] = deque(maxlen=MAX_CASES)
+        # Counted separately from `assessed`, which advances on unscored types
+        # too - and those return before the sweep is reached, so a modulus on
+        # `assessed` skips a whole 10,000 every time the boundary happens to
+        # land on a cash-in or a fee. In a mix dominated by unscored types the
+        # sweep effectively never fired.
+        self._since_evict = 0
         # With no model trained yet, this is the point of running at all: the
         # history is built either way, and the recorder writes it down.
         self.recorder = recorder
@@ -109,21 +137,28 @@ class FraudRiskEngine:
     def assess(self, context: RiskContext) -> RiskDecision:
         """Score one transaction. Never raises.
 
-        The engine treats an exception here as ALLOW, but catching it here as
-        well means a failure is *counted* rather than silently absorbed - a rail
-        that is failing on every call and a rail that is finding nothing look
-        identical from the outside otherwise.
+        The simulation engine also treats an exception as ALLOW, but catching it
+        here means a failure is *counted* rather than silently absorbed - a rail
+        failing on every call and a rail finding nothing look identical from the
+        outside otherwise. An earlier version documented that guarantee without
+        implementing it, and left the counters unable to reconcile: `assessed`
+        advanced while `_record` was skipped.
         """
         self.counters.assessed += 1
 
-        if context.tx_type in CARD_TYPES:
-            decision = self.card.assess(context)
-            self._record_traffic(context)
-        elif context.tx_type in WIRE_TYPES:
-            decision = self.wire.assess(context)
-        else:
-            self.counters.unscored += 1
-            return RiskDecision.allow(rail="none", reason="type is not scored")
+        try:
+            if context.tx_type in CARD_TYPES:
+                decision = self.card.assess(context)
+                self._record_traffic(context)
+            elif context.tx_type in WIRE_TYPES:
+                decision = self.wire.assess(context)
+            else:
+                self.counters.unscored += 1
+                return RiskDecision.allow(rail="none", reason="type is not scored")
+        except Exception:
+            self.counters.failed += 1
+            log.exception("risk scorer raised; allowing the transaction")
+            return RiskDecision.allow(rail="none", reason="risk scorer raised")
 
         self._record(context, decision)
         self._maybe_evict(context)
@@ -168,7 +203,9 @@ class FraudRiskEngine:
         ))
 
     def _maybe_evict(self, context: RiskContext) -> None:
-        if self.counters.assessed % EVICT_EVERY == 0:
+        self._since_evict += 1
+        if self._since_evict >= EVICT_EVERY:
+            self._since_evict = 0
             dropped = self.history.evict_stale(context.sim_time_ns)
             if dropped:
                 log.debug("evicted %d stale accounts from card history", dropped)
@@ -185,6 +222,7 @@ class FraudRiskEngine:
             "blocked": counters.blocked,
             "review": counters.review,
             "flagged": flagged,
+            "failed": counters.failed,
             "flag_rate": flagged / max(counters.assessed - counters.unscored, 1),
             "by_rail": dict(counters.by_rail),
             "open_cases": len(self.cases),

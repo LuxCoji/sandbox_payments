@@ -29,6 +29,7 @@ different statement. Everything here is a count or a ratio.
 """
 from __future__ import annotations
 
+import math
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 
@@ -179,6 +180,14 @@ class TransferGraph:
             received[2] -= edge.amount_paise
             received[3] -= 1
 
+            # An account whose every edge has aged out leaves a zeroed entry
+            # behind, and nothing removed it - so the dict grew for the life of
+            # the process while the docstring claimed the window bounded memory.
+            # With account churn that is unbounded growth, not a slow leak.
+            for account in (edge.source, edge.destination):
+                if self._totals[account] == [0, 0, 0, 0]:
+                    del self._totals[account]
+
     @staticmethod
     def _drop(index: dict[str, dict[str, list[Edge]]], key: str, other: str,
               edge: Edge) -> None:
@@ -225,7 +234,12 @@ class TransferGraph:
 
         shortest = 0
         closed = 0
-        fastest = 0.0
+        # `inf` rather than 0.0. Zero is a *real* value here - a cycle whose
+        # legs share a timestamp closes instantly, which is the most suspicious
+        # shape this rail can see - and using it as the sentinel meant that
+        # cycle was never flagged, while a later slower cycle could overwrite
+        # it and be reported as the "fastest".
+        fastest = math.inf
         visited_budget = MAX_CYCLE_SEARCH_NODES
 
         for first_hop, edges in neighbours.items():
@@ -258,7 +272,7 @@ class TransferGraph:
                     if nxt == account_id:
                         found_length = depth + 1
                         fastest_here = (last - start) / NANOS_PER_HOUR
-                        if fastest == 0.0 or fastest_here < fastest:
+                        if fastest_here < fastest:
                             fastest = fastest_here
                         break
                     if nxt not in seen:
@@ -273,4 +287,4 @@ class TransferGraph:
                 if shortest == 0 or found_length < shortest:
                     shortest = found_length
 
-        return shortest, closed, fastest
+        return shortest, closed, (0.0 if fastest is math.inf else fastest)

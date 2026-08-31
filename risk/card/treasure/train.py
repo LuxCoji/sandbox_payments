@@ -63,12 +63,24 @@ class Arm:
 
 
 def as_dataset(seq: dict) -> TensorDataset:
+    """Arrays to tensors, including which positions carry a real label.
+
+    `label_mask` defaults to every real position, which is what the IEEE-CIS
+    path wants. A caller that labels only some positions must supply it.
+    """
+    import numpy as np
+
+    label_mask = seq.get("label_mask")
+    if label_mask is None:
+        label_mask = ~seq["pad_mask"]
+
     return TensorDataset(
         torch.from_numpy(seq["static_cat"]).long(),
         torch.from_numpy(seq["dyn_num"]).float(),
         torch.from_numpy(seq["dyn_cat"]).long(),
         torch.from_numpy(seq["pad_mask"]),
         torch.from_numpy(seq["sig_cat"][..., 0]).long(),
+        torch.from_numpy(np.ascontiguousarray(label_mask)),
     )
 
 
@@ -121,21 +133,44 @@ def next_transaction_loss(out_next: dict, dyn_num: torch.Tensor,
 
 
 def signal_loss(out_signal: dict, sig: torch.Tensor, pad: torch.Tensor,
-                weight: torch.Tensor) -> torch.Tensor:
-    """Weighted cross-entropy on the fraud flag at every real position.
+                weight: torch.Tensor,
+                label_mask: torch.Tensor | None = None) -> torch.Tensor:
+    """Weighted cross-entropy on the fraud flag, where a label actually exists.
 
     Fraud is a few percent of rows, so an unweighted loss is minimised by
     predicting "genuine" everywhere. The positive class is weighted by its
     inverse frequency - a loss weight inside one model, not a resampled dataset.
+
+    **`label_mask` is not optional in spirit.** Two callers build sequences
+    differently. The IEEE-CIS path gives every position its own label, because
+    every position is a distinct transaction being judged. The simulator path
+    emits one sequence *per transaction*, ending at the one being judged, and
+    labels only that last position - so every earlier position is a real
+    transaction carrying a placeholder zero.
+
+    Reading `~pad` there is a serious error, and it was one: a fraudulent
+    transaction reappears as a non-final position in up to 31 later sequences,
+    so the loss saw it once labelled fraud and twenty-nine times labelled
+    genuine. The model was being trained against itself on exactly the rows that
+    matter most. Serving reads one position - the last - so the loss must too.
     """
-    valid = ~pad
+    valid = (~pad) if label_mask is None else label_mask
     logits = head_logits(out_signal["cats"][0])[valid]
     return nn.functional.cross_entropy(logits, sig[valid], weight=weight)
 
 
 def positive_weight(seq: dict) -> float:
-    """Inverse frequency of fraud among the real positions of a sequence set."""
-    labels = seq["sig_cat"][..., 0][~seq["pad_mask"]]
+    """Inverse frequency of fraud among the positions that carry a label.
+
+    Measured over the labelled positions, not every real one - otherwise a
+    sequence set that labels only its last position reports a fraud rate
+    thirty times lower than the truth, and the positive class is weighted
+    thirty times too heavily.
+    """
+    mask = seq.get("label_mask")
+    if mask is None:
+        mask = ~seq["pad_mask"]
+    labels = seq["sig_cat"][..., 0][mask]
     rate = float(labels.mean())
     if rate <= 0:
         raise ValueError("no positive labels in the training sequences")
@@ -160,7 +195,7 @@ def pretrain(model, seq: dict, cfg: Arm, device: str, log=print) -> None:
     for epoch in range(1, cfg.pretrain_epochs + 1):
         model.train()
         total, seen = 0.0, 0
-        for sc, dn, dc, pad, _ in loader:
+        for sc, dn, dc, pad, _, _ in loader:
             sc, dn, dc, pad = (t.to(device) for t in (sc, dn, dc, pad))
             out = model(_batch_dict(sc, dn, dc, pad, device))
             loss = next_transaction_loss(out["next"], dn, dc, pad)
@@ -185,11 +220,12 @@ def finetune(model, seq: dict, cfg: Arm, device: str, log=print) -> None:
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         sig_total, aux_total, seen = 0.0, 0.0, 0
-        for sc, dn, dc, pad, sig in loader:
-            sc, dn, dc, pad, sig = (t.to(device) for t in (sc, dn, dc, pad, sig))
+        for sc, dn, dc, pad, sig, mask in loader:
+            sc, dn, dc, pad, sig, mask = (
+                t.to(device) for t in (sc, dn, dc, pad, sig, mask))
             out = model(_batch_dict(sc, dn, dc, pad, device))
 
-            main = signal_loss(out["signal"], sig, pad, weight)
+            main = signal_loss(out["signal"], sig, pad, weight, mask)
             if cfg.aux_weight > 0:
                 aux = next_transaction_loss(out["next"], dn, dc, pad)
                 loss = main + cfg.aux_weight * aux
@@ -222,7 +258,7 @@ def score(model, seq: dict, cfg: Arm, device: str) -> np.ndarray:
     model.eval()
     loader = DataLoader(as_dataset(seq), batch_size=cfg.batch_size * 2)
     out_scores = []
-    for sc, dn, dc, pad, _ in loader:
+    for sc, dn, dc, pad, _, _ in loader:
         sc, dn, dc, pad = (t.to(device) for t in (sc, dn, dc, pad))
         out = model(_batch_dict(sc, dn, dc, pad, device))
         probs = torch.softmax(head_logits(out["signal"]["cats"][0]), dim=-1)[..., 1]

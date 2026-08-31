@@ -119,6 +119,13 @@ def stack(sequences: list[list[Observation]], labels: np.ndarray,
         "dyn_num": np.zeros((n, MAX_SEQ_LEN, len(DYNAMIC_NUM)), dtype="float32"),
         "pad_mask": np.ones((n, MAX_SEQ_LEN), dtype=bool),
         "sig_cat": np.zeros((n, MAX_SEQ_LEN, 1), dtype="int64"),
+        # Which positions carry a real label. Only the last one does here, and
+        # the loss must be told - every earlier position is a real transaction
+        # sitting at a placeholder zero, and a loss reading `~pad_mask` would
+        # train the model that those transactions are genuine. A fraudulent row
+        # reappears as a non-final position in up to 31 later sequences, so it
+        # was being labelled fraud once and genuine twenty-nine times.
+        "label_mask": np.zeros((n, MAX_SEQ_LEN), dtype=bool),
     }
     for i, sequence in enumerate(sequences):
         arrays = encode_sequence(sequence, vocab)
@@ -129,8 +136,11 @@ def stack(sequences: list[list[Observation]], labels: np.ndarray,
         # The label belongs to the transaction being judged - the last real
         # position. Labelling every position with it would tell the model that
         # an account's whole history was fraudulent because its last payment
-        # was.
-        out["sig_cat"][i, arrays["length"] - 1, 0] = labels[i]
+        # was; leaving the rest at zero *and letting the loss read them* is the
+        # opposite error, and is the one that shipped.
+        last = arrays["length"] - 1
+        out["sig_cat"][i, last, 0] = labels[i]
+        out["label_mask"][i, last] = True
     return out
 
 
@@ -183,7 +193,7 @@ def train(traffic_path: Path, out_path: Path, device: str = "cpu",
     vocab = Vocabulary.fit(train_sequences)
     train_arrays = stack(train_sequences, train_labels, vocab)
 
-    config = dict(model_config or DEFAULT_MODEL_CONFIG)
+    config = dict(DEFAULT_MODEL_CONFIG if model_config is None else model_config)
     model = build_model(build_schema(vocab), ModelConfig(**config))
 
     warm = None

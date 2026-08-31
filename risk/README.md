@@ -188,6 +188,45 @@ the best AUC. On IEEE-CIS's 590,540 rows it was the only lever that paid; on
 26,007 it does not, which is consistent with a self-supervised phase needing
 volume.
 
+## Findings from a review of this branch
+
+A review of the diff found ten issues; all are fixed and each has a test. Four
+were material:
+
+**The supervised loss trained on labels that contradicted each other.**
+`to_sequences` emits one sequence per transaction, so a fraudulent row reappears
+as a non-final position in up to 31 later sequences - where it sat at a
+placeholder zero. The loss read every real position, so the model saw that row
+once labelled fraud and twenty-nine times labelled genuine. Serving reads one
+position; the loss now does too, through an explicit `label_mask`. **The first
+trained model was affected and has been retrained.**
+
+**An instantaneous cycle was invisible.** `fastest_cycle_hours` used `0.0` as
+both "no cycle found" and "closed in zero hours", and the signal gated on
+`0 < fastest`. A round trip whose legs share a timestamp - the most suspicious
+shape this rail can see, and not exotic in a discrete-event simulator - never
+fired. Worse, the sentinel test could re-fire after a legitimate zero and let a
+slower cycle be reported as the fastest.
+
+**The velocity counters saturated below the window they serve.** The timestamp
+deque held 512 entries against windows reaching a week, so an account
+transacting once a minute pinned `txns_last_day` and `txns_last_week` to the
+same 512 after eight hours - on exactly the card-testing bursts and mule
+throughput those features exist to separate.
+
+**The account graph did not bound its memory.** Eviction decremented the totals
+but never removed a zeroed entry, so the dict grew for the life of the process
+while the docstring claimed the window bounded it.
+
+The rest: the eviction sweep ran on a modulus of a counter that unscored types
+also advance (and those return before the sweep, so it could skip entire
+intervals); `assess` documented a try/except it did not have, leaving the
+counters unable to reconcile when a rail raised; the case list was unbounded;
+`load()` dropped the checkpoint's stored model config, so a load-save round trip
+stamped the default shape onto non-default weights; and two `dict(x or default)`
+defaults where `{}` silently became the full default - the same class of bug as
+the `AccountHistory` one, with a dict.
+
 ## What is still to do
 
 1. Measure against the red team - the only test that is not marking its own

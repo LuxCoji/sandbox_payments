@@ -11,6 +11,7 @@ simulator's traffic yet, and a test cannot manufacture one.
 """
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from risk.card.history import NANOS_PER_DAY, NANOS_PER_HOUR, AccountHistory
@@ -719,3 +720,194 @@ def test_the_console_escapes_everything_it_renders():
     body = page[page.index("<table>"):]
     assert "<script" not in body and "<img" not in body, (
         "a tag from the case data reached the document as markup")
+
+
+# --- bugs a review found, each pinned ---------------------------------------
+
+def _row(i, fraud):
+    return {"account_id": "a", "is_fraud": int(fraud), "observation": {
+        "sim_time_ns": i * 60e9, "amount_paise": 1000, "tx_type": "PAYMENT",
+        "account_type": "PERSONAL", "kyc_level": 1,
+        "destination_account_id": "d", "gateway_id": "g",
+        "device_type": "MOBILE", "time_delta_seconds": 60.0,
+        "hour_of_day": i % 24, "day_of_week": i % 7,
+        "distinct_destinations": 1, "distinct_devices": 1,
+        "distinct_gateways": 1, "txns_last_hour": 1, "txns_last_day": 1,
+        "txns_last_week": 1, "seconds_since_first_seen": 60.0 * i,
+        "seconds_since_new_destination": 60.0,
+        "amount_over_account_mean": 1.0}}
+
+
+def test_the_loss_only_reads_positions_that_carry_a_label():
+    """A row labelled fraud must not also be presented to the loss as genuine.
+
+    `to_sequences` emits one sequence per transaction, so a fraudulent row
+    reappears as a non-final position in up to 31 later sequences. Those
+    positions sit at a placeholder zero, and a loss reading `~pad_mask` saw the
+    fraud once labelled 1 and twenty-nine times labelled 0 - training the model
+    against itself on exactly the rows that matter most.
+    """
+    from risk.card.encoding import Vocabulary
+    from risk.card.training import stack, to_sequences
+
+    rows = [_row(i, i == 20) for i in range(40)]
+    sequences, labels = to_sequences(rows)
+    arrays = stack(sequences, labels, Vocabulary.fit(sequences))
+
+    mask = arrays["label_mask"]
+    assert mask.sum() == len(sequences), "one labelled position per sequence"
+    assert (mask.sum(axis=1) == 1).all(), "exactly one, never more"
+
+    # The label must land on the position serving reads: the last real one.
+    lengths = (~arrays["pad_mask"]).sum(axis=1)
+    assert np.array_equal(mask.argmax(axis=1), lengths - 1)
+    assert int((arrays["sig_cat"][..., 0] * mask).sum()) == int(labels.sum())
+
+
+def test_the_positive_weight_counts_labelled_positions_only():
+    """Weighting over every real position understates the fraud rate thirtyfold."""
+    from risk.card.treasure.train import positive_weight
+
+    n, length = 100, 32
+    seq = {"sig_cat": np.zeros((n, length, 1), dtype="int64"),
+           "pad_mask": np.zeros((n, length), dtype=bool),
+           "label_mask": np.zeros((n, length), dtype=bool)}
+    seq["label_mask"][:, -1] = True
+    seq["sig_cat"][:10, -1, 0] = 1          # 10% of the labelled positions
+
+    assert positive_weight(seq) == pytest.approx(9.0, rel=0.01)
+
+
+def test_an_instantaneous_cycle_is_the_strongest_signal_not_a_missing_one():
+    """0.0 hours meant both "no cycle" and "closed instantly".
+
+    A cycle whose legs share a timestamp is the most suspicious shape this rail
+    can see, and the sentinel silently excluded exactly that one - while a later
+    slower cycle could overwrite it and be reported as the fastest.
+    """
+    graph = TransferGraph()
+    graph.add("A", "B", 100_000, 1000.0)
+    graph.add("B", "A", 100_000, 1000.0)
+
+    structure = graph.structure("A", 1000.0)
+    assert structure.cycle_count == 1
+    assert structure.fastest_cycle_hours == 0.0
+
+    names = {s.name for s in WireScorer()._signals(structure, "sender")}
+    assert "tight_cycle" in names, "an instantaneous cycle must fire the signal"
+
+
+def test_the_graph_forgets_accounts_as_well_as_edges():
+    """Zeroed totals were left behind, so memory grew with account churn."""
+    graph = TransferGraph()
+    for i in range(50):
+        graph.add(f"a{i}", f"b{i}", 1_000, i * 1e9)
+
+    graph.add("fresh", "other", 1_000, 40 * NANOS_PER_DAY)
+
+    assert len(graph._totals) <= 2, (
+        f"{len(graph._totals)} zeroed totals entries survived eviction")
+
+
+def test_velocity_counters_do_not_saturate():
+    """A capped deque made a day and a week indistinguishable.
+
+    At 512 stamps an account transacting once a minute pinned txns_last_day and
+    txns_last_week to the same number after eight hours - on exactly the
+    high-throughput accounts these features exist to separate.
+    """
+    history = AccountHistory()
+    for i in range(700):
+        observation = history.observe(
+            context("acct", "shop", 10_000, i * 60e9, TransactionType.PAYMENT))
+
+    assert observation.txns_last_day > 512, (
+        f"txns_last_day saturated at {observation.txns_last_day}")
+    assert observation.txns_last_hour < observation.txns_last_day, (
+        "an hour and a day must not report the same count")
+
+
+def test_eviction_is_not_skipped_by_unscored_traffic():
+    """The sweep ran on a modulus of a counter unscored types also advance.
+
+    Unscored types return before the sweep is reached, so every time the
+    boundary landed on a cash-in the history went another full interval
+    unpruned.
+    """
+    from risk.engine import EVICT_EVERY
+
+    engine = FraudRiskEngine()
+    for i in range(EVICT_EVERY - 1):
+        engine.assess(context("a", "b", 100, i * 1e9, TransactionType.CASH_IN))
+    assert engine._since_evict == 0, "unscored traffic advanced the sweep counter"
+
+
+def test_a_failing_rail_is_counted_not_absorbed():
+    """A rail failing every call and one finding nothing must look different."""
+    class Exploding:
+        history = None
+
+        def assess(self, context):
+            raise RuntimeError("model file is corrupt")
+
+    engine = FraudRiskEngine(card_scorer=Exploding())
+    decision = engine.assess(context("a", "b", 100, 0.0, TransactionType.PAYMENT))
+
+    assert decision.action is RiskAction.ALLOW, "a broken rail must not block"
+    assert engine.summary()["failed"] == 1, "the failure was absorbed silently"
+
+
+def test_cases_are_bounded():
+    """Every other store here is bounded; this one grew for the run's lifetime."""
+    from sim.core.interfaces import RiskDecision
+
+    from risk.engine import MAX_CASES
+
+    engine = FraudRiskEngine()
+    flagged = RiskDecision(action=RiskAction.REVIEW, score=0.9, rail="wire",
+                           reason="fixture")
+    for _ in range(MAX_CASES + 500):
+        engine._record(context("a", "b", 100, 0.0), flagged)
+
+    assert len(engine.cases) == MAX_CASES
+
+
+def test_two_histories_are_refused_rather_than_silently_split():
+    """A scorer with its own history detaches every count from what is scored."""
+    from risk.card.scorer import UntrainedCardScorer
+
+    with pytest.raises(ValueError, match="different AccountHistory"):
+        FraudRiskEngine(card_scorer=UntrainedCardScorer(history=AccountHistory()),
+                        history=AccountHistory())
+
+
+def test_a_checkpoint_round_trip_keeps_its_shape(tmp_path):
+    """save() writes self.config, and load() had been dropping the stored one.
+
+    A resumed fine-tune or a re-export then stamped the default shape onto
+    non-default weights, and the next load built a default-sized model for a
+    mismatched state dict - the silent size mismatch the module exists to
+    prevent.
+    """
+    from risk.card.encoding import Vocabulary, build_schema
+    from risk.card.model import TorchSequenceModel
+    from risk.card.treasure.config import ModelConfig
+    from risk.card.treasure.model import build_model
+
+    config = {"d_model": 32, "n_layers": 2, "n_heads": 2, "input_layers": 1,
+              "max_seq_len": 32}
+    vocab = Vocabulary(tables={"tx_type": {"PAYMENT": 1}, "gateway_id": {"g": 1},
+                               "device_type": {"MOBILE": 1},
+                               "hour_of_day": {"1": 1}, "day_of_week": {"1": 1},
+                               "account_type": {"PERSONAL": 1},
+                               "kyc_level": {"1": 1}})
+    model = build_model(build_schema(vocab), ModelConfig(**config))
+
+    first = tmp_path / "a.pt"
+    TorchSequenceModel(model, vocab, config=config).save(first)
+
+    second = tmp_path / "b.pt"
+    TorchSequenceModel.load(first).save(second)
+
+    assert TorchSequenceModel.load(second).config["d_model"] == 32, (
+        "the stored shape was replaced by the default on a round trip")

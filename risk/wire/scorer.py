@@ -183,9 +183,12 @@ class WireScorer:
                 "fan_in", 0.30,
                 f"{side} was paid by {structure.fan_in_burst} accounts within six hours"))
 
+        # Gated on the cycle existing, not on its speed being above zero. A
+        # cycle closing in 0.0 hours is instantaneous, which is the strongest
+        # signal available - and `0 < fastest` silently excluded exactly that.
         if (structure.cycle_count
                 and 0 < structure.shortest_cycle <= limits.cycle_max_length
-                and 0 < structure.fastest_cycle_hours <= limits.cycle_hours):
+                and structure.fastest_cycle_hours <= limits.cycle_hours):
             signals.append(Signal(
                 "tight_cycle", 0.40,
                 f"{side} sits on {structure.cycle_count} cycle(s), shortest "

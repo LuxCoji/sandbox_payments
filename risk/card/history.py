@@ -101,7 +101,14 @@ class _AccountState:
     recent: deque[Observation] = field(default_factory=lambda: deque(maxlen=MAX_SEQ_LEN))
     # Timestamps only, for the rolling windows. Kept separately from `recent`
     # because the windows look further back than the model's attention span.
-    timestamps: deque[float] = field(default_factory=lambda: deque(maxlen=512))
+    #
+    # The cap has to exceed what a week can hold, or the counters saturate and
+    # stop distinguishing the accounts they exist to separate. At 512 an account
+    # transacting once a minute pinned txns_last_day and txns_last_week to the
+    # same 512 after eight hours - precisely on a card-testing burst or a
+    # high-throughput mule. Eviction below drops anything older than the widest
+    # window, so the cap is a safety bound rather than the real limit.
+    timestamps: deque[float] = field(default_factory=lambda: deque(maxlen=20_000))
 
 
 class AccountHistory:
@@ -206,6 +213,11 @@ class AccountHistory:
         state.amount_count += 1
         state.last_seen_ns = context.sim_time_ns
         state.timestamps.append(context.sim_time_ns)
+        # Anything older than the widest rolling window can never be counted
+        # again, so it is dropped here rather than left to the deque's cap.
+        oldest = context.sim_time_ns - 7 * NANOS_PER_DAY
+        while state.timestamps and state.timestamps[0] < oldest:
+            state.timestamps.popleft()
         state.recent.append(observation)
 
 

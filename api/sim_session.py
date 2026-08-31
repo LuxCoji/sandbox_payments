@@ -179,7 +179,8 @@ class SimSession:
         """The open cases, newest first."""
         if self.risk is None:
             return []
-        return [dataclasses.asdict(c) for c in self.risk.cases[-limit:][::-1]]
+        return [dataclasses.asdict(c)
+                for c in list(self.risk.cases)[-limit:][::-1]]
 
     def branch_summary(self, branch_id: str) -> dict:
         handle = self.branches[branch_id]

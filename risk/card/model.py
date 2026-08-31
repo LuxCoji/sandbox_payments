@@ -51,7 +51,10 @@ class TorchSequenceModel:
         # state dict loads happily into a differently-sized embedding table
         # whenever the shapes line up, and the model then reads the wrong column
         # for every category.
-        self.config = dict(config or DEFAULT_MODEL_CONFIG)
+        # `is None`, not `or`: an empty dict is falsy, and `{}` is the natural
+        # way to say "no overrides" - which would silently become the full
+        # default instead. Same class as the AccountHistory bug, with a dict.
+        self.config = dict(DEFAULT_MODEL_CONFIG if config is None else config)
 
     @torch.no_grad()
     def fraud_probability(self, sequence: list[Observation]) -> float:
@@ -113,7 +116,15 @@ class TorchSequenceModel:
                             ModelConfig(**checkpoint.get("model_config",
                                                          DEFAULT_MODEL_CONFIG)))
         model.load_state_dict(checkpoint["state_dict"])
-        return cls(model, vocab, device=device)
+        # The *stored* config, not the default. The model is built from it above
+        # but `save()` writes back `self.config`, so falling back to the default
+        # here means a load -> save round trip - a resumed fine-tune, a
+        # re-export - stamps the default shape onto non-default weights. The
+        # next load then builds a default-sized model and loads a mismatched
+        # state dict, which is the silent size mismatch this module exists to
+        # prevent.
+        return cls(model, vocab, device=device,
+                   config=checkpoint.get("model_config", DEFAULT_MODEL_CONFIG))
 
 
 def score_all(model: TorchSequenceModel,
