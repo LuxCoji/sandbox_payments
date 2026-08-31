@@ -152,6 +152,16 @@ class RiskContext:
     source_account_type: AccountType | None = None
     source_kyc_level: int = 0
     destination_account_type: AccountType | None = None
+    # Paying into a frozen, closed or disputed account is a different thing
+    # from paying into a live one, and the rails could not see the difference.
+    destination_status: AccountStatus | None = None
+    # Who owns each end. `actor_id` is the acting owner, so it duplicates the
+    # source's; the destination's is what lets a rail tell "three people paid
+    # this account" from "one person moved money between three accounts they
+    # own" - shapes that are identical on an account graph and are not the same
+    # event at all.
+    source_owner_id: str = ""
+    destination_owner_id: str = ""
 
 
 @dataclass(frozen=True)

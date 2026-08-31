@@ -44,6 +44,7 @@ from sim.core.events import (
 from sim.core.gateway import GatewayEntity
 from sim.core.interfaces import (
     AccountSnapshot,
+    AccountStatus,
     AccountType,
     ActorRole,
     Command,
@@ -507,6 +508,9 @@ class WorldEngineImpl:
             source_account_type=src.account_type,
             source_kyc_level=src.kyc_level,
             destination_account_type=destination.account_type if destination else None,
+            destination_status=destination.status if destination else None,
+            source_owner_id=src.owner_id,
+            destination_owner_id=destination.owner_id if destination else "",
         )
         try:
             return self._risk.assess(context)

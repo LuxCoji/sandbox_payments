@@ -963,3 +963,88 @@ def test_a_large_payment_still_faces_a_lower_bar_than_a_small_one():
     bands = AmountAwareBands()
     assert bands.step_up_threshold(50_000_000) < bands.step_up_threshold(100_000)
     assert bands.step_up_threshold(100_000) < bands.step_up_threshold(2_500)
+
+
+# --- facts the graph structurally cannot see ---------------------------------
+
+def context_with(**overrides):
+    """A transfer context with the fields these two signals read."""
+    from sim.core.interfaces import RiskContext
+
+    base = dict(
+        tx_id="tx", tx_type=TransactionType.TRANSFER, actor_id="owner-a",
+        source_account_id="a", destination_account_id="b", amount_paise=50_000,
+        sim_time_ns=0.0, gateway_id="gw", device_type=DeviceType.MOBILE,
+        source_account_type=AccountType.PERSONAL, source_kyc_level=1)
+    base.update(overrides)
+    return RiskContext(**base)
+
+
+def test_paying_into_a_dead_account_raises_a_case():
+    """A frozen account is under review; a closed one should receive nothing.
+
+    This is a fact rather than an inference, so unlike the structural signals it
+    is weighted to raise a case on its own.
+    """
+    from sim.core.interfaces import AccountStatus
+
+    for status in (AccountStatus.FROZEN, AccountStatus.CLOSED,
+                   AccountStatus.DISPUTED):
+        decision = WireScorer().assess(context_with(destination_status=status))
+        assert decision.action is RiskAction.REVIEW, (
+            f"a transfer into a {status.value} account passed unflagged")
+        assert status.value.lower() in decision.reason.lower()
+
+    live = WireScorer().assess(context_with(destination_status=AccountStatus.ACTIVE))
+    assert live.action is RiskAction.ALLOW, "an active destination is ordinary"
+
+
+def test_moving_money_between_your_own_accounts_is_a_weak_signal():
+    """Self-dealing is what anyone with a savings account does.
+
+    It is only meaningful in combination, so it must not raise a case alone -
+    otherwise every transfer to your own savings becomes a laundering alert.
+    """
+    scorer = WireScorer()
+    same_owner = scorer.assess(context_with(source_owner_id="alice",
+                                            destination_owner_id="alice"))
+    assert same_owner.action is RiskAction.ALLOW, (
+        "a self-transfer on its own must not raise a case")
+    assert same_owner.score > 0, "but it should contribute to the score"
+
+    different = WireScorer().assess(context_with(source_owner_id="alice",
+                                                 destination_owner_id="bob"))
+    assert different.score < same_owner.score
+
+
+def test_two_unknown_owners_are_not_a_match():
+    """Empty means the engine did not supply an owner, not that they are equal."""
+    decision = WireScorer().assess(context_with(source_owner_id="",
+                                                destination_owner_id=""))
+    assert decision.score == 0.0, "two unknowns were treated as the same person"
+
+
+def test_the_engine_supplies_the_new_fields():
+    """The signals are useless if the context arrives with them empty."""
+    from sim.core.events import AccountCreated
+    from sim.core.interfaces import AccountStatus, Command
+
+    seen = []
+
+    class Recording:
+        def assess(self, context):
+            seen.append(context)
+            from sim.core.interfaces import RiskDecision
+            return RiskDecision.allow(rail="wire")
+
+    engine = world_engine(risk=Recording())
+    engine.execute_command(Command(
+        command_id="c", actor_id="user1", action_type=TransactionType.TRANSFER,
+        source_account_id="acc1", target_account_id="acc2", amount_paise=500,
+        idempotency_key="k"))
+
+    assert seen, "the rail was never consulted"
+    context = seen[-1]
+    assert context.source_owner_id == "user1"
+    assert context.destination_owner_id == "user2"
+    assert context.destination_status is AccountStatus.ACTIVE

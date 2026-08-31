@@ -29,7 +29,12 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from risk.wire.graph import AccountStructure, TransferGraph
-from sim.core.interfaces import RiskAction, RiskContext, RiskDecision
+from sim.core.interfaces import (
+    AccountStatus,
+    RiskAction,
+    RiskContext,
+    RiskDecision,
+)
 
 RAIL = "wire"
 
@@ -78,6 +83,20 @@ class WireThresholds:
     # A loop that closes inside a day, through few enough hops to be deliberate.
     cycle_hours: float = 24.0
     cycle_max_length: int = 4
+
+    # Paying into an account that is not live. A frozen or disputed account is
+    # under review already, and a closed one should not be receiving money at
+    # all - so a transfer into either is worth a look regardless of shape.
+    # Weighted to raise a case on its own, because unlike the structural
+    # signals this is a fact rather than an inference.
+    dead_destination: float = 0.65
+
+    # Moving money between accounts you own is not laundering by itself - it is
+    # what anyone with a savings account does. It becomes a signal only in
+    # combination, which is why it is weighted low: a self-transfer that also
+    # sits on a tight cycle or forwards everything it receives is layering
+    # through accounts a single person controls.
+    self_dealing: float = 0.25
 
     # The score at which a case is raised.
     #
@@ -157,7 +176,9 @@ class WireScorer:
         destination = self.graph.structure(context.destination_account_id,
                                            context.sim_time_ns)
 
-        signals = self._signals(source, "sender") + self._signals(destination, "recipient")
+        signals = (self._signals(source, "sender")
+                   + self._signals(destination, "recipient")
+                   + self._context_signals(context))
         score = min(1.0, sum(s.weight for s in signals))
 
         if score >= self.thresholds.review_at:
@@ -166,6 +187,33 @@ class WireScorer:
                 reason="; ".join(s.detail for s in signals),
             )
         return RiskDecision.allow(rail=RAIL, score=score)
+
+    def _context_signals(self, context: RiskContext) -> list[Signal]:
+        """Facts about the transaction itself, rather than the graph shape.
+
+        These are things the account graph structurally cannot see. Who owns an
+        account is not an edge, and an account's status is not a shape - both
+        arrive on the context and were being thrown away.
+        """
+        signals: list[Signal] = []
+        limits = self.thresholds
+
+        status = context.destination_status
+        if status is not None and status is not AccountStatus.ACTIVE:
+            signals.append(Signal(
+                "dead_destination", limits.dead_destination,
+                f"destination account is {status.value}"))
+
+        # Both ends known and the same person on each. Empty strings mean the
+        # engine did not supply owners, and two unknowns are not a match.
+        source_owner = context.source_owner_id
+        destination_owner = context.destination_owner_id
+        if source_owner and destination_owner and source_owner == destination_owner:
+            signals.append(Signal(
+                "self_dealing", limits.self_dealing,
+                "both accounts have the same owner"))
+
+        return signals
 
     def _signals(self, structure: AccountStructure, side: str) -> list[Signal]:
         """Which patterns this account matches, and how much each is worth."""
