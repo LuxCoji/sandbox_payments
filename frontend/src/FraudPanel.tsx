@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
-import { api, type RetrainStatus, type RiskCase, type RiskSummary } from "./api";
+import {
+  api,
+  type ChainHop,
+  type RetrainStatus,
+  type RiskCase,
+  type RiskSummary,
+} from "./api";
 import { formatPaise, shortId } from "./eventStyle";
 
 /**
@@ -16,6 +22,12 @@ export function FraudPanel() {
   const [error, setError] = useState<string | null>(null);
   const [retrain, setRetrain] = useState<RetrainStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  // A reviewer's name is required on every action - "who decided this" is the
+  // first question an audit asks, and defaulting it to "system" would make
+  // every freeze unattributable.
+  const [reviewer, setReviewer] = useState("");
+  const [openCase, setOpenCase] = useState<string | null>(null);
+  const [outcome, setOutcome] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -69,6 +81,39 @@ export function FraudPanel() {
   };
 
   const running = retrain?.status === "running";
+
+  const act = async (
+    action: "freeze" | "clear" | "stepUp",
+    caseId: string,
+  ) => {
+    if (!reviewer.trim()) {
+      setOutcome("Enter your name first — every decision is recorded against it.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const call =
+        action === "freeze"
+          ? api.freezeCase
+          : action === "clear"
+            ? api.clearCase
+            : api.stepUpCase;
+      await call({ case_id: caseId, reviewer, reason: "" });
+      setOutcome(
+        action === "freeze"
+          ? `Freeze requested on ${caseId} — recorded, not executed. The engine holds the funds.`
+          : action === "clear"
+            ? `Cleared ${caseId} — kept in the log and reopenable.`
+            : `Challenge sent for ${caseId}.`,
+      );
+    } catch (e) {
+      // The refusals here are the interesting ones: a freeze with no reviewer,
+      // or a step-up on the wire rail, which would be tipping off.
+      setOutcome(String(e instanceof Error ? e.message : e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="fraud-panel">
@@ -158,6 +203,24 @@ export function FraudPanel() {
         )}
       </div>
 
+      <div className="reviewer-bar">
+        <label>
+          Reviewer
+          <input
+            value={reviewer}
+            placeholder="your name"
+            onChange={(e) => setReviewer(e.target.value)}
+          />
+        </label>
+        <span className="fraud-note">
+          Every decision is recorded against this name. A freeze is a request,
+          not an act — the engine holds the funds and acts on an instruction
+          with a case behind it.
+        </span>
+      </div>
+
+      {outcome && <div className="fraud-outcome">{outcome}</div>}
+
       {cases.length === 0 ? (
         <div className="empty">No cases raised.</div>
       ) : (
@@ -182,12 +245,68 @@ export function FraudPanel() {
                 <td>{c.action}</td>
                 <td className="mono">{c.score.toFixed(2)}</td>
                 <td className="mono">{formatPaise(c.amount_paise)}</td>
-                <td className="reason">{c.reason}</td>
+                <td className="reason">
+                  {c.reason}
+                  {c.chain.length > 0 && (
+                    <button
+                      className="link"
+                      onClick={() => setOpenCase(openCase === c.tx_id ? null : c.tx_id)}
+                    >
+                      {openCase === c.tx_id
+                        ? "hide the route"
+                        : `follow the money (${c.chain.length} hop${c.chain.length > 1 ? "s" : ""})`}
+                    </button>
+                  )}
+                  {openCase === c.tx_id && <Chain hops={c.chain} />}
+                  <div className="case-actions">
+                    <button disabled={busy} onClick={() => act("freeze", c.tx_id)}>
+                      Request freeze
+                    </button>
+                    {c.rail === "card" && (
+                      <button disabled={busy} onClick={() => act("stepUp", c.tx_id)}>
+                        Send OTP
+                      </button>
+                    )}
+                    <button disabled={busy} onClick={() => act("clear", c.tx_id)}>
+                      Clear
+                    </button>
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
+    </div>
+  );
+}
+
+/** The route money took after a flagged transfer.
+ *
+ *  A case saying "this transfer looks unusual" is not reviewable. The decision
+ *  is whether to freeze an account, and that needs the chain: which accounts,
+ *  how much, how fast, and where it stopped moving. */
+function Chain({ hops }: { hops: ChainHop[] }) {
+  return (
+    <div className="chain">
+      {hops.map((h) => (
+        <div key={h.hop} className="chain-hop">
+          <span className="mono">{shortId(h.from_account)}</span>
+          <span className="chain-arrow">→</span>
+          <span className="mono">{shortId(h.to_account)}</span>
+          <span className="chain-detail">
+            {formatPaise(h.amount_paise)} over {h.transfers} transfer
+            {h.transfers > 1 ? "s" : ""}
+            {h.hours > 0 && ` in ${h.hours.toFixed(1)}h`}
+            {" · forwarded on "}
+            {(h.forwarded_on * 100).toFixed(0)}%
+            {h.other_legs > 0 && ` · ${h.other_legs} other leg${h.other_legs > 1 ? "s" : ""} here`}
+          </span>
+        </div>
+      ))}
+      <div className="chain-end">
+        the money stops here — this account kept most of what arrived
+      </div>
     </div>
   );
 }

@@ -1259,3 +1259,84 @@ def test_recall_on_an_empty_holdout_is_zero_not_a_crash():
     from risk.registry import recall_at
 
     assert recall_at(np.zeros(100, dtype=int), np.random.rand(100)) == 0.0
+
+
+# --- the chain, and acting on a case ----------------------------------------
+
+def test_the_chain_follows_money_and_stops_where_it_settles():
+    """A case saying "this transfer looks unusual" is not reviewable.
+
+    The decision is whether to freeze an account, and that needs the route.
+    The trace follows legs that kept moving and stops at the account that kept
+    what arrived - following past it would trace ordinary payments outward
+    forever.
+    """
+    graph = TransferGraph()
+    legs = [("victim", "mule", 500_000), ("mule", "layer1", 480_000),
+            ("layer1", "layer2", 460_000), ("layer2", "rests", 440_000)]
+    for i, (a, b, amount) in enumerate(legs):
+        graph.add(a, b, amount, i * NANOS_PER_HOUR)
+
+    chain = graph.trace_chain("victim", 4 * NANOS_PER_HOUR)
+
+    assert [h["to_account"] for h in chain] == ["mule", "layer1", "layer2", "rests"]
+    assert chain[0]["forwarded_on"] > 0.9, "a waypoint forwards what it receives"
+    assert chain[-1]["forwarded_on"] == 0.0, "the chain ends where money settles"
+
+
+def test_the_chain_is_bounded_on_a_hub():
+    """A hub account would otherwise fan the trace across the whole graph."""
+    graph = TransferGraph()
+    graph.add("start", "hub", 100_000, 0.0)
+    for i in range(200):
+        graph.add("hub", f"out{i}", 90_000, (i + 1) * 1e9)
+
+    chain = graph.trace_chain("start", 300 * 1e9)
+    assert len(chain) <= 6, f"traced {len(chain)} hops"
+    assert chain[1]["other_legs"] > 0, "the reviewer must see one route was chosen"
+
+
+def test_a_wire_case_carries_its_chain_and_a_card_case_does_not():
+    """Tracing every transfer would walk the graph for traffic nobody reads."""
+    engine = FraudRiskEngine()
+    hour = 3600 * 1e9
+    for i in range(10):
+        engine.assess(context(f"payer{i}", "mule", 900_000, i * hour / 10))
+    for i in range(10):
+        engine.assess(context("mule", f"layer{i}", 880_000, (10 + i) * hour / 10))
+
+    wire = [c for c in engine.cases if c.rail == "wire"]
+    assert wire, "the mule pattern raised nothing"
+    assert any(c.chain for c in wire), "no wire case carried a route"
+
+    engine.assess(context("acct", "shop", 1000, 0.0, TransactionType.PAYMENT))
+    card = [c for c in engine.cases if c.rail == "card"]
+    assert all(not c.chain for c in card), "a card case has no chain to follow"
+
+
+def test_a_broken_trace_does_not_lose_the_case():
+    """A trace is context for a reviewer, not part of the decision."""
+    from sim.core.interfaces import RiskDecision
+
+    engine = FraudRiskEngine()
+
+    class Exploding:
+        def trace_chain(self, *a, **k):
+            raise RuntimeError("graph is corrupt")
+
+    engine.wire.graph = Exploding()
+    flagged = RiskDecision(action=RiskAction.REVIEW, score=0.9, rail="wire",
+                           reason="fixture")
+    engine._record(context("a", "b", 100, 0.0), flagged)
+
+    assert len(engine.cases) == 1, "the case was dropped because its trace failed"
+    assert engine.cases[0].chain == []
+
+
+def test_a_step_up_on_the_wire_rail_is_refused():
+    """A challenge saying "confirm this payment" tells a customer they are under
+    review, which on an AML case is tipping off - a criminal offence."""
+    from risk.actions import notify_customer
+
+    assert notify_customer("wire", "STEP_UP")["notify"] is False
+    assert notify_customer("card", "STEP_UP")["notify"] is True

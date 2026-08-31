@@ -597,3 +597,97 @@ body {
   background: rgba(210, 80, 79, 0.12);
   border-color: rgba(210, 80, 79, 0.5);
 }
+
+.reviewer-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.reviewer-bar label {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.reviewer-bar input {
+  margin-left: 8px;
+  padding: 4px 9px;
+  font-size: 12px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+}
+
+.reviewer-bar .fraud-note {
+  margin: 0;
+  flex: 1 1 30ch;
+}
+
+.case-actions {
+  margin-top: 7px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.case-actions button {
+  padding: 3px 9px;
+  font-size: 11px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+  cursor: pointer;
+}
+
+.case-actions button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button.link {
+  margin-left: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #5fa8d3;
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* The traced route. Cool accent throughout - this is a flow, not a severity. */
+.chain {
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  border-left: 2px solid #5fa8d3;
+  background: rgba(95, 168, 211, 0.06);
+  border-radius: 0 3px 3px 0;
+}
+
+.chain-hop {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  padding: 2px 0;
+}
+
+.chain-arrow {
+  color: #5fa8d3;
+}
+
+.chain-detail {
+  opacity: 0.65;
+}
+
+.chain-end {
+  margin-top: 5px;
+  font-size: 11px;
+  opacity: 0.5;
+  font-style: italic;
+}

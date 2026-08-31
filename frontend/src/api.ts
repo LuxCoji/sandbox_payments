@@ -101,12 +101,34 @@ export interface RedTeamSession {
 
 const BASE = "/api";
 
+/** POST JSON and surface the server's own message on a refusal.
+ *
+ *  The refusals here are meaningful - "a freeze needs a named reviewer",
+ *  "telling a customer they are under AML review is a criminal offence" - so
+ *  swallowing them into a generic error would hide the reason the action was
+ *  not taken. */
+async function post(path: string, body: unknown): Promise<unknown> {
+  const response = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.detail ?? `HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
 async function j<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
   return res.json();
 }
 
 export const api = {
+  freezeCase: (body: CaseDecision) => post("/risk/cases/freeze", body),
+  clearCase: (body: CaseDecision) => post("/risk/cases/clear", body),
+  stepUpCase: (body: CaseDecision) => post("/risk/cases/step-up", body),
   startRetrain: () =>
     fetch(`${BASE}/risk/retrain`, { method: "POST" }).then((r) => j<{ status: string }>(r)),
   retrainStatus: (signal?: AbortSignal) =>
@@ -209,6 +231,29 @@ export type RiskCase = {
   source_account_id: string;
   destination_account_id: string;
   sim_time_ns: number;
+  /** Where the money went after this leg. Empty on the card rail. */
+  chain: ChainHop[];
+};
+
+/** A reviewer's answer to a case. The reviewer's name is required - "who
+ *  decided this" is the first question an audit asks. */
+export type CaseDecision = {
+  case_id: string;
+  reviewer: string;
+  reason?: string;
+  second_reviewer?: string | null;
+};
+
+/** One hop of the route money took after a flagged transfer. */
+export type ChainHop = {
+  hop: number;
+  from_account: string;
+  to_account: string;
+  amount_paise: number;
+  transfers: number;
+  hours: number;
+  forwarded_on: number;
+  other_legs: number;
 };
 
 /** A model version and what it measured when it was considered. */

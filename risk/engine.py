@@ -77,6 +77,11 @@ class Case:
     source_account_id: str
     destination_account_id: str
     sim_time_ns: float
+    # Where the money went after this leg. A case saying "this transfer looks
+    # unusual" is not reviewable - the decision is whether to freeze an account,
+    # and that needs the route: which accounts, how much, how fast, and where it
+    # stopped. Empty on the card rail, which has no chain to follow.
+    chain: list = field(default_factory=list)
 
 
 @dataclass
@@ -169,6 +174,23 @@ class FraudRiskEngine:
         self._maybe_evict(context)
         return decision
 
+    def _trace(self, context: RiskContext, decision: RiskDecision) -> list:
+        """The route the money took, for a wire case.
+
+        Only traced for cases that are actually raised. Tracing every transfer
+        would walk the graph on the 98% of traffic nobody will ever look at.
+        """
+        if decision.rail != "wire":
+            return []
+        try:
+            return self.wire.graph.trace_chain(context.source_account_id,
+                                               context.sim_time_ns)
+        except Exception:
+            # A trace is context for a reviewer, not part of the decision. If it
+            # fails the case is still worth raising without it.
+            log.exception("chain trace failed")
+            return []
+
     def _record_traffic(self, context: RiskContext) -> None:
         """Append this payment to the training set, if one is being collected.
 
@@ -205,6 +227,7 @@ class FraudRiskEngine:
             source_account_id=context.source_account_id,
             destination_account_id=context.destination_account_id,
             sim_time_ns=context.sim_time_ns,
+            chain=self._trace(context, decision),
         ))
 
     def _maybe_evict(self, context: RiskContext) -> None:

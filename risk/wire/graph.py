@@ -238,6 +238,72 @@ class TransferGraph:
         return sum(1 for edges in index.get(account_id, {}).values()
                    for e in edges if e.at_ns >= cutoff)
 
+    def trace_chain(self, account_id: str, now_ns: float,
+                    max_hops: int = 6, max_width: int = 4) -> list[dict]:
+        """Follow the money out of an account, hop by hop.
+
+        A case that says "this transfer looks unusual" is not reviewable. A
+        reviewer has to decide whether to freeze an account, and that decision
+        needs the route: where the money came from, where it went, and how fast
+        each leg closed.
+
+        Follows only legs that **kept moving** - a hop is included when the
+        receiving account forwarded most of what arrived, within the window. An
+        account that received money and held it is where the chain ends, and
+        following past it would trace ordinary payments outward forever.
+
+        Bounded on both axes. `max_hops` because a chain longer than six is not
+        something a reviewer reads, and `max_width` because a hub account would
+        otherwise fan the trace across the whole graph.
+        """
+        cutoff = now_ns - CYCLE_WINDOW_NS
+        chain: list[dict] = []
+        seen = {account_id}
+        frontier = account_id
+
+        for hop in range(max_hops):
+            outgoing = []
+            for destination, edges in self._out.get(frontier, {}).items():
+                recent = [e for e in edges if e.at_ns >= cutoff]
+                if recent and destination not in seen:
+                    outgoing.append((destination, recent))
+
+            if not outgoing:
+                break
+
+            # The largest legs first - a reviewer cares where the money went,
+            # not where a rounding error went.
+            outgoing.sort(key=lambda item: -sum(e.amount_paise for e in item[1]))
+            outgoing = outgoing[:max_width]
+
+            destination, edges = outgoing[0]
+            moved = sum(e.amount_paise for e in edges)
+            structure = self.structure(destination, now_ns)
+
+            chain.append({
+                "hop": hop + 1,
+                "from_account": frontier,
+                "to_account": destination,
+                "amount_paise": moved,
+                "transfers": len(edges),
+                "hours": (max(e.at_ns for e in edges) - min(e.at_ns for e in edges))
+                         / NANOS_PER_HOUR,
+                "forwarded_on": round(structure.passthrough, 3),
+                # Other legs at this hop, so the reviewer knows the trace picked
+                # one route out of several rather than that only one existed.
+                "other_legs": len(outgoing) - 1,
+            })
+
+            seen.add(destination)
+            frontier = destination
+
+            # The chain ends where the money stops. An account that kept most of
+            # what arrived is a destination, not a waypoint.
+            if structure.passthrough < 0.5:
+                break
+
+        return chain
+
     def _value(self, index: dict[str, dict[str, list[Edge]]], account_id: str,
                now_ns: float) -> int:
         """Money moved across these edges inside the tight window.

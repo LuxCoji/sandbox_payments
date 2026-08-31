@@ -136,6 +136,48 @@ runs 42% attacker-touching traffic, so any budget saturates at 100% precision
 and the splits are indistinguishable. Worth revisiting once the generator
 produces a realistic fraud rate.
 
+## Following the chain
+
+A case saying "this transfer looks unusual" is not reviewable. The decision in
+front of a reviewer is whether to freeze an account, and that needs the route:
+which accounts, how much, how fast each leg closed, and where the money stopped.
+
+`TransferGraph.trace_chain` follows the money forward hop by hop, and follows
+only legs that **kept moving** - a hop is included when the receiving account
+forwarded most of what arrived. An account that received money and held it is
+where the chain ends; following past it would trace ordinary payments outward
+forever.
+
+Bounded on both axes: six hops, because a longer chain is not something a
+reviewer reads, and four legs per hop, because a hub account would otherwise fan
+the trace across the whole graph. When a hop had other legs the case says so, so
+the reviewer knows one route was chosen rather than that only one existed.
+
+Only cases that are actually raised get traced. Tracing every transfer would
+walk the graph for the 98% of traffic nobody will look at. A trace that fails is
+logged and dropped - it is context, not part of the decision, and a case is
+still worth raising without it.
+
+## Acting on a case
+
+`POST /api/risk/cases/freeze`, `/clear`, `/step-up`. Every one requires a named
+reviewer; `risk/actions.py` raises rather than defaulting to "system", because
+"who decided this" is the first question an audit asks. A freeze above one crore
+needs a second reviewer.
+
+**A freeze is a request, not an act.** It records an intent and returns it. The
+engine holds the funds and should act on an instruction with a case behind it,
+not on a callback from a model.
+
+**A step-up on the wire rail is refused, not ignored.** A challenge saying
+"confirm this payment" tells the customer they are under review, and on an AML
+case that is tipping off. The endpoint returns the reason rather than a generic
+error, and the UI shows it.
+
+Clearing does not delete. The rail flagged the case for a stated reason, and a
+reviewer's judgement is one piece of evidence rather than the last word - the
+log is append-only and a cleared case can be reopened.
+
 ## The card rail
 
 A sequence model (TREASURE, arXiv:2511.19693) reading each account's recent

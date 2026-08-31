@@ -535,3 +535,106 @@ async def rollback_model():
         raise HTTPException(400, "no earlier promoted model to roll back to")
     return {"rolled_back_to": previous.to_dict(),
             "note": "restart the session to load it"}
+
+
+# ── Acting on a case ──────────────────────────────────────────────────────
+#
+# A flagged case is a question, not a decision. These are the answers a
+# reviewer can give, and each one is recorded with their name against it.
+#
+# **Nothing here freezes an account on a model's say-so.** The wire rail runs at
+# roughly 12% precision, so an automatic freeze would stop about eight innocent
+# parties per real laundering operation. `risk/actions.py` refuses a freeze with
+# no named reviewer and requires a second above one crore.
+
+
+class Decision(BaseModel):
+    case_id: str
+    reviewer: str
+    reason: str = ""
+    second_reviewer: str | None = None
+
+
+def _case_log():
+    from risk.actions import CaseLog
+
+    return CaseLog(Path("runs/case_decisions.jsonl"))
+
+
+def _find_case(case_id: str):
+    session = _session()
+    if session.risk is None:
+        raise HTTPException(400, "fraud detection is not enabled")
+    for case in session.risk.cases:
+        if str(case.tx_id) == case_id:
+            return case
+    raise HTTPException(404, f"no open case {case_id}")
+
+
+@app.post("/api/risk/cases/freeze")
+async def freeze_case(decision: Decision):
+    """Request a freeze on the accounts in a case.
+
+    Records an intent and returns it. **It does not freeze anything** - the
+    engine holds the funds and should act on an instruction with a case behind
+    it, not on a callback from a model.
+    """
+    from risk.actions import request_freeze
+
+    try:
+        recorded = request_freeze(
+            _find_case(decision.case_id), reviewer=decision.reviewer,
+            reason=decision.reason, log=_case_log(),
+            second_reviewer=decision.second_reviewer)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return recorded.to_dict()
+
+
+@app.post("/api/risk/cases/clear")
+async def clear_case_endpoint(decision: Decision):
+    """Record that a reviewer judged a case not to be fraud.
+
+    The case is not deleted. The rail flagged it for a stated reason, and a
+    reviewer's judgement is one piece of evidence rather than the last word.
+    """
+    from risk.actions import clear_case
+
+    try:
+        recorded = clear_case(_find_case(decision.case_id),
+                              reviewer=decision.reviewer,
+                              reason=decision.reason, log=_case_log())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return recorded.to_dict()
+
+
+@app.post("/api/risk/cases/step-up")
+async def step_up_case(decision: Decision):
+    """Challenge the customer - an OTP or equivalent. Card rail only.
+
+    On the wire rail this is refused rather than ignored. Telling someone they
+    are under money-laundering review is tipping off, a criminal offence, and a
+    challenge saying "confirm this payment" is exactly that message.
+    """
+    from risk.actions import notify_customer, request_information
+
+    case = _find_case(decision.case_id)
+    permitted = notify_customer(case.rail, "STEP_UP")
+    if not permitted["notify"]:
+        raise HTTPException(400, permitted["reason"])
+
+    recorded = request_information(case, reviewer=decision.reviewer,
+                                   question=decision.reason or "step-up sent",
+                                   log=_case_log())
+    return {**recorded.to_dict(), "customer_message": permitted["message"]}
+
+
+@app.get("/api/risk/decisions")
+async def list_decisions():
+    """Every decision taken, and what they add up to."""
+    from risk.actions import summarise
+
+    log = _case_log()
+    return {"decisions": [d.to_dict() for d in log.all()[-50:]][::-1],
+            "summary": summarise(log)}
