@@ -152,12 +152,49 @@ emitting anything. The wire rail therefore sees no organic transfer traffic. Tha
 is the simulator's own behaviour and this integration does not reach in and
 change it.
 
+## What the card model measures, and why the headline number is not one
+
+Trained on 26,007 simulator transactions with 1,386 fraud (5.3%), three
+configurations, three seeds each. The model loads, scores live traffic, and the
+amount-aware bands fire: on a short run it blocked 9 payments and challenged 2
+out of 418, a 2.6% flag rate.
+
+**The recall figure it reports is an artefact and should not be quoted.** Every
+one of the nine runs returned exactly 23.06% recall at a 2% flag rate, with zero
+spread. That is not nine models agreeing; it is arithmetic. Precision was
+**1.000 in every run** - every flagged transaction was fraud - and the holdout
+holds 451 frauds in 5,202 rows. Flagging 2% means flagging 104 transactions, so
+104/451 = 23.06% is the ceiling any model hits once it can rank 104 frauds at
+the top. The operating point, not the model, is the binding constraint.
+
+Two things follow, and both matter more than the number:
+
+**The scripted fraud is too easy.** Perfect precision and an AUC reaching
+0.9999 mean the patterns are trivially separable. They were written from the
+red-team playbook, and a model that learns them has learned four specific
+shapes rather than what fraud looks like.
+
+**A 2% flag rate is the wrong operating point for this fixture.** The holdout is
+8.7% fraud, four times the flag budget. Real card fraud runs near 1%; the
+harness over-injected. Where the arms actually differ is at 5%, which ranges 38%
+to 58%.
+
+So the model is real, the pipeline is verified end to end, and **the number that
+would tell you whether any of this works does not exist yet**. It comes from the
+red team, attacking patterns the model has never seen.
+
+One measured aside: pretraining did **not** help here. The no-pretrain arm took
+the best AUC. On IEEE-CIS's 590,540 rows it was the only lever that paid; on
+26,007 it does not, which is consistent with a self-supervised phase needing
+volume.
+
 ## What is still to do
 
-1. Train the card model - see above; the path is built and tested.
-2. Measure against red-team attacks the model has not seen. Train on scripted
-   patterns, be judged on the LLM's own - otherwise it is marking its own
+1. Measure against the red team - the only test that is not marking its own
    homework.
+2. Regenerate traffic with a realistic fraud rate and harder patterns, then
+   refit the card bands against it.
+
 
 ## Two bugs worth knowing about
 
