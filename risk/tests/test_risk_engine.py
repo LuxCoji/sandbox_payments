@@ -11,6 +11,8 @@ simulator's traffic yet, and a test cannot manufacture one.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -1048,3 +1050,113 @@ def test_the_engine_supplies_the_new_fields():
     assert context.source_owner_id == "user1"
     assert context.destination_owner_id == "user2"
     assert context.destination_status is AccountStatus.ACTIVE
+
+
+# --- the red-team playbook, pattern by pattern -------------------------------
+#
+# `agents/redteam/personas.py` tells the attacker exactly which eight gaps to
+# aim at. Each test below drives one of them and asserts the rails notice.
+# These are the patterns the system will actually be attacked with, so "a
+# detector exists" is not enough - it has to fire on the shape as described.
+
+def transfer(source, destination, amount, at_ns, owner=None, dest_owner=None,
+             tx_type=TransactionType.TRANSFER):
+    from sim.core.interfaces import RiskContext
+
+    return RiskContext(
+        tx_id=f"tx-{at_ns}", tx_type=tx_type, actor_id=owner or f"owner-{source}",
+        source_account_id=source, destination_account_id=destination,
+        amount_paise=amount, sim_time_ns=at_ns, gateway_id="gw",
+        device_type=DeviceType.MOBILE, source_account_type=AccountType.PERSONAL,
+        source_kyc_level=1, source_owner_id=owner or f"owner-{source}",
+        destination_owner_id=dest_owner or f"owner-{destination}")
+
+
+def test_playbook_1_unbounded_inbound_value():
+    """"Drive far more value into an account than its tier could ever send."
+
+    `fan_in` counts *payers*, so value arriving from two accounts registers on
+    nothing. This is the playbook's opening gap and the mule primitive.
+    """
+    scorer = WireScorer()
+    decision = None
+    for i in range(4):
+        decision = scorer.assess(transfer(f"payer{i % 2}", "mule",
+                                          800_000, i * 60e9))
+
+    structure = scorer.graph.structure("mule", 4 * 60e9)
+    assert structure.fan_in_burst == 2, "only two distinct payers"
+    assert structure.received_burst == 3_200_000, "but a large sum arrived"
+    assert decision.action is RiskAction.REVIEW
+
+
+def test_playbook_3_one_owner_many_accounts():
+    """"A total, moved by you, that exceeds any single account's allowance."
+
+    Every transfer is individually legal and from a different account. Only
+    summing per owner shows it.
+    """
+    scorer = WireScorer()
+    decision = None
+    for i in range(6):
+        # Six accounts, one owner, each moving a modest amount to a stranger.
+        decision = scorer.assess(transfer(f"acct{i}", f"other{i}", 1_000_000,
+                                          i * 600e9, owner="attacker"))
+
+    value, count = scorer.owner_volume("attacker", 6 * 600e9)
+    assert value == 6_000_000 and count == 6
+    assert decision.action is RiskAction.REVIEW
+    assert "owner moved" in decision.reason
+
+
+def test_playbook_7_cash_out_is_seen():
+    """"Value reconverging into one account and leaving."
+
+    The exit leg was not scored at all, so the rails watched money pool up and
+    then lost sight of it at the moment the pattern completes.
+    """
+    from risk.engine import WIRE_TYPES
+
+    assert TransactionType.CASH_OUT in WIRE_TYPES, (
+        "cash-out is where laundering ends; a rail that cannot see it watches "
+        "the money arrive and never leave")
+
+    engine = FraudRiskEngine()
+    decision = engine.assess(transfer("mule", "CASH_ENTITY", 500_000, 0.0,
+                                      tx_type=TransactionType.CASH_OUT))
+    assert decision.rail == "wire", "cash-out reached no rail"
+    assert engine.summary()["scored"] == 1
+
+
+def test_playbook_4_and_5_rolling_windows_and_counts():
+    """"Counters reset on the sim-day boundary" and "count is never enforced".
+
+    Every window here rolls, so there is no boundary to wait for, and
+    `send_burst` counts transactions where the engine only caps value.
+    """
+    scorer = WireScorer()
+    decision = None
+    # Fifteen sends, each individually small, across a single day boundary.
+    for i in range(15):
+        decision = scorer.assess(transfer("attacker", f"dest{i % 3}", 90_000,
+                                          i * 1200e9))
+
+    assert decision.action is RiskAction.REVIEW, (
+        "a fifteen-transfer burst crossing a day boundary must still register")
+
+
+def test_the_red_team_runs_defended_by_default():
+    """An attack against a system with the controls off measures nothing.
+
+    Risk is off by default everywhere else, which keeps the engine
+    byte-identical for replay tests. The red-team entry point is the one place
+    that default is wrong.
+    """
+    import subprocess
+    import sys
+
+    source = Path(__file__).resolve().parents[2] / "scripts" / "red_team_run.py"
+    text = source.read_text(encoding="utf-8")
+    assert "enable_risk=not args.no_risk" in text, (
+        "the red-team runner must enable the rails unless asked not to")
+    assert "--no-risk" in text, "there must be a way to run undefended on purpose"

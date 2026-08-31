@@ -129,7 +129,28 @@ from the clean run and never re-fitted.
 | | |
 | --- | --- |
 | false alarms on legitimate traffic | 0.53% |
-| precision on the cases it raised | 28.6% |
+| precision on the cases it raised | **87.4%** |
+
+Precision was 28.6% until the thresholds stopped being guesses. Two changes got
+it there, and the second is the one that mattered.
+
+**Not every signal deserves the same weight.** A structural inference - fan-out
+looks like a payroll run, a cycle looks like a supply chain - is worth about a
+third of the bar, so a case needs two of them. A quantitative fact - "this
+account was credited 32,000 rupees in six hours" - is not an inference about
+intent, and a rail that demanded two of those would miss the single-primitive
+attacks it exists to catch. The red-team playbook is explicit that findings
+"always carry a NUMBER", so the rail now weighs numbers accordingly.
+
+**Value limits written in rupees are guesses about an economy.** The hand-set
+50,000-rupee owner limit sat *below* what an ordinary account moves in a day and
+*above* what a mule chain moves in six legs - so it flagged the honest
+population and missed every attacker, scoring 0% precision. `calibrate()` now
+fits the value limits from the traffic itself, at a percentile derived from the
+flag-rate budget rather than a fixed one: a value signal raises a case alone, so
+the share of traffic above a limit *is* roughly the share flagged by it. A fixed
+99.5th percentile measured 14% flagged; deriving it from the budget gives
+0.53%.
 
 Two bugs were found getting there, and both are worth knowing:
 

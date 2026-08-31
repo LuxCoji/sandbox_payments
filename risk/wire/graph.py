@@ -83,6 +83,11 @@ class AccountStructure:
     # transfers to two accounts is a structuring burst that fan-out scores as
     # 2, well under any sensible distinct-payee threshold.
     sent_burst: int = 0
+    # Value *received* inside the scatter window. `in_degree` and `fan_in_burst`
+    # both count senders; an account can be credited without bound from very
+    # few of them, which is the uncapped-inbound gap the red-team playbook
+    # opens with.
+    received_burst: int = 0
 
     @property
     def passthrough(self) -> float:
@@ -170,6 +175,7 @@ class TransferGraph:
             fan_out_burst=self._burst(self._out, account_id, now_ns),
             fan_in_burst=self._burst(self._in, account_id, now_ns),
             sent_burst=self._volume(self._out, account_id, now_ns),
+            received_burst=self._value(self._in, account_id, now_ns),
         )
 
     def _evict(self, now_ns: float) -> None:
@@ -230,6 +236,18 @@ class TransferGraph:
         """
         cutoff = now_ns - SCATTER_GATHER_WINDOW_NS
         return sum(1 for edges in index.get(account_id, {}).values()
+                   for e in edges if e.at_ns >= cutoff)
+
+    def _value(self, index: dict[str, dict[str, list[Edge]]], account_id: str,
+               now_ns: float) -> int:
+        """Money moved across these edges inside the tight window.
+
+        `_burst` counts partners and `_volume` counts transfers; this counts
+        rupees. All three are different shapes, and a large sum arriving from
+        two accounts registers on none of the other two.
+        """
+        cutoff = now_ns - SCATTER_GATHER_WINDOW_NS
+        return sum(e.amount_paise for edges in index.get(account_id, {}).values()
                    for e in edges if e.at_ns >= cutoff)
 
     def _cycles_through(self, account_id: str,
