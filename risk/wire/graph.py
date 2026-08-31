@@ -78,6 +78,11 @@ class AccountStructure:
     fastest_cycle_hours: float = 0.0
     fan_out_burst: int = 0         # distinct payees inside the scatter window
     fan_in_burst: int = 0          # distinct payers inside the scatter window
+    # Transfers *sent* inside the scatter window, counting repeats. Distinct
+    # counterparties and sheer volume are different shapes: fifteen rapid
+    # transfers to two accounts is a structuring burst that fan-out scores as
+    # 2, well under any sensible distinct-payee threshold.
+    sent_burst: int = 0
 
     @property
     def passthrough(self) -> float:
@@ -164,6 +169,7 @@ class TransferGraph:
             fastest_cycle_hours=fastest,
             fan_out_burst=self._burst(self._out, account_id, now_ns),
             fan_in_burst=self._burst(self._in, account_id, now_ns),
+            sent_burst=self._volume(self._out, account_id, now_ns),
         )
 
     def _evict(self, now_ns: float) -> None:
@@ -212,6 +218,19 @@ class TransferGraph:
             1 for edges in index.get(account_id, {}).values()
             if any(e.at_ns >= cutoff for e in edges)
         )
+
+    def _volume(self, index: dict[str, dict[str, list[Edge]]], account_id: str,
+                now_ns: float) -> int:
+        """Transfers inside the tight window, counting repeats to one partner.
+
+        `_burst` answers "how many different people", this answers "how many
+        transfers". Structuring splits one sum across many *sends*, and the
+        destinations may be few - so a detector that only counts distinct
+        partners scores that burst as 2 and misses it.
+        """
+        cutoff = now_ns - SCATTER_GATHER_WINDOW_NS
+        return sum(1 for edges in index.get(account_id, {}).values()
+                   for e in edges if e.at_ns >= cutoff)
 
     def _cycles_through(self, account_id: str,
                         now_ns: float) -> tuple[int, int, float]:

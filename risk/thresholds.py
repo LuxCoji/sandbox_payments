@@ -52,7 +52,25 @@ class AmountAwareBands:
     false_positive_cost_paise: float = 50_000.0     # 500 rupees
     block_multiplier: float = 1.6
     floor: float = 0.05
-    ceiling: float = 0.99
+
+    # The ceiling is a **step-up** ceiling, and it is deliberately below one.
+    #
+    # Elkan's rule is right per transaction and wrong for card testing. At 0.99
+    # a 25-rupee payment needed 0.952 confidence to be challenged and 0.990 to
+    # be declined - and card testing uses exactly those amounts, on purpose,
+    # precisely because a 25-rupee loss is not worth stopping. The cost of
+    # missing it is not 25 rupees; it is the large fraud the validated card
+    # then funds.
+    #
+    # A step-up is also not priced by the transaction. It costs a genuine
+    # customer about ten seconds whatever the amount, so the rule's assumption
+    # that a false positive costs a fixed sum comparable to the transaction
+    # breaks down at the bottom of the range.
+    ceiling: float = 0.75
+    # Blocking still asks for near-certainty at any amount: a hard decline on a
+    # small payment is a lost sale plus an angry customer, and unlike a step-up
+    # it cannot be recovered from by the customer confirming.
+    block_ceiling: float = 0.97
 
     def step_up_threshold(self, amount_paise: int) -> float:
         """The bar a score must clear to trigger a challenge."""
@@ -61,9 +79,15 @@ class AmountAwareBands:
         return _clamp(raw, self.floor, self.ceiling)
 
     def block_threshold(self, amount_paise: int) -> float:
-        """The bar for a hard decline. Always at or above the step-up bar."""
-        raw = self.step_up_threshold(amount_paise) * self.block_multiplier
-        return _clamp(raw, self.floor, self.ceiling)
+        """The bar for a hard decline. Always at or above the step-up bar.
+
+        Clamped to its own, higher ceiling. The step-up ceiling is lowered so a
+        confident model can still challenge a one-rupee card test; a *decline*
+        on that payment is a different trade and keeps asking for near-certainty.
+        """
+        cost = self.false_positive_cost_paise
+        raw = (cost / (cost + max(amount_paise, 0))) * self.block_multiplier
+        return _clamp(raw, self.floor, self.block_ceiling)
 
     def decide(self, score: float, amount_paise: int) -> RiskAction:
         """Which of the three card-rail outcomes this score and amount imply.
@@ -71,6 +95,9 @@ class AmountAwareBands:
         Order matters: block is checked first, because at large amounts the two
         thresholds converge and a score can clear both.
         """
+        # Both bars are read from the same amount, so the block bar being
+        # higher is a property of the multiplier and the two ceilings rather
+        # than something to re-derive here.
         if score >= self.block_threshold(amount_paise):
             return RiskAction.BLOCK
         if score >= self.step_up_threshold(amount_paise):

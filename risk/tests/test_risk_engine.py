@@ -911,3 +911,55 @@ def test_a_checkpoint_round_trip_keeps_its_shape(tmp_path):
 
     assert TorchSequenceModel.load(second).config["d_model"] == 32, (
         "the stored shape was replaced by the default on a round trip")
+
+
+# --- gaps a red-team review exposed -----------------------------------------
+
+def test_volume_is_counted_separately_from_distinct_partners():
+    """Structuring splits one sum across many sends, not many partners.
+
+    Fifteen rapid transfers across two accounts scores 2 on fan-out and slips
+    under any sensible distinct-payee threshold. Counting sends catches it.
+    """
+    graph = TransferGraph()
+    for i in range(15):
+        graph.add("mule", f"dest{i % 2}", 95_000, i * 60e9)
+
+    structure = graph.structure("mule", 15 * 60e9)
+    assert structure.fan_out_burst == 2, "only two distinct destinations"
+    assert structure.sent_burst == 15, "but fifteen transfers"
+
+    names = {s.name for s in WireScorer()._signals(structure, "sender")}
+    assert "send_burst" in names, "a fifteen-transfer burst must raise something"
+
+
+def test_a_card_test_can_be_challenged():
+    """Elkan's rule is right per transaction and wrong for card testing.
+
+    At a single 0.99 ceiling a 25-rupee payment needed 0.952 confidence to be
+    challenged - and card testing uses exactly those amounts, on purpose,
+    because a 25-rupee loss is not worth stopping. The cost of missing it is
+    not 25 rupees; it is the large fraud the validated card then funds.
+    """
+    bands = AmountAwareBands()
+    tiny = 2_500          # 25 rupees
+
+    assert bands.decide(0.80, tiny) is RiskAction.STEP_UP, (
+        "a confident model must be able to challenge a card test")
+    assert bands.decide(0.40, tiny) is RiskAction.ALLOW, (
+        "an unconfident score on a tiny payment must still pass")
+
+
+def test_blocking_a_tiny_payment_still_needs_near_certainty():
+    """A step-up is recoverable in ten seconds; a decline is a lost sale."""
+    bands = AmountAwareBands()
+    assert bands.block_threshold(100) >= 0.95
+    for amount in (1, 2_500, 100_000, 10_000_000):
+        assert bands.block_threshold(amount) >= bands.step_up_threshold(amount)
+
+
+def test_a_large_payment_still_faces_a_lower_bar_than_a_small_one():
+    """Splitting the ceilings must not flatten the curve it sits on."""
+    bands = AmountAwareBands()
+    assert bands.step_up_threshold(50_000_000) < bands.step_up_threshold(100_000)
+    assert bands.step_up_threshold(100_000) < bands.step_up_threshold(2_500)

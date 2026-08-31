@@ -69,6 +69,12 @@ class WireThresholds:
     fan_out_burst: int = 8
     fan_in_burst: int = 8
 
+    # Sheer volume of sends inside the same window, repeats included. Distinct
+    # counterparties and volume are different shapes, and structuring produces
+    # the second without the first: fifteen transfers split across two accounts
+    # scores 2 on fan-out and slips under it.
+    sent_burst: int = 12
+
     # A loop that closes inside a day, through few enough hops to be deliberate.
     cycle_hours: float = 24.0
     cycle_max_length: int = 4
@@ -182,6 +188,11 @@ class WireScorer:
             signals.append(Signal(
                 "fan_in", 0.30,
                 f"{side} was paid by {structure.fan_in_burst} accounts within six hours"))
+
+        if structure.sent_burst >= limits.sent_burst:
+            signals.append(Signal(
+                "send_burst", 0.30,
+                f"{side} made {structure.sent_burst} transfers within six hours"))
 
         # Gated on the cycle existing, not on its speed being above zero. A
         # cycle closing in 0.0 hours is instantaneous, which is the strongest
