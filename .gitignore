@@ -44,9 +44,15 @@ agents/redteam/.persona_identity.json
 # Collected simulator traffic. Generated, large, and reproducible from a seed.
 runs/
 
-# Trained models, except the shipped one. A checkpoint is generated output and
+# Trained models, except the shipped ones. A checkpoint is generated output and
 # does not belong in git as a rule - but a branch that cannot be cloned and run
-# is worth less than the rule is worth keeping, and 11 MB is a price worth
-# paying for that. Models a retrain produces stay out.
+# is worth less than the rule is worth keeping.
+#
+# Both rails ship a model, and both exceptions have to be listed. Adding
+# wire_xgboost.json without its `!` line silently left the wire model out of
+# every clone while the code that loads it went in, which reads as "the model
+# is optional" rather than "the model is missing".
 models/*
 !models/card.pt
+!models/wire_xgboost.json
+!models/wire_feature_names.json

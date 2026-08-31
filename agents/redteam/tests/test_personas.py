@@ -29,7 +29,9 @@ def _account(
     return AccountSnapshot(
         account_id=account_id, account_type=account_type, balance_paise=balance_paise,
         status=AccountStatus.ACTIVE, kyc_level=kyc_level, created_at=0.0, daily_tx_count=0,
-        daily_tx_volume_paise=daily_tx_volume_paise, linked_device_ids=(), owner_id=owner_id,
+        daily_tx_volume_paise=daily_tx_volume_paise,
+        daily_inbound_tx_count=0, daily_inbound_volume_paise=0,
+        linked_device_ids=(), owner_id=owner_id,
     )
 
 

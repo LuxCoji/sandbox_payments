@@ -247,6 +247,8 @@ class DailyCountersReset(DomainEvent):
     account_id: str = ""
     old_daily_tx_count: int = 0
     old_daily_tx_volume_paise: int = 0
+    old_daily_inbound_tx_count: int = 0
+    old_daily_inbound_volume_paise: int = 0
 
 
 # ── Rejection Events ─────────────────────────────────────────────────────
