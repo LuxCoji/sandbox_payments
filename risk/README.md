@@ -265,6 +265,34 @@ stamped the default shape onto non-default weights; and two `dict(x or default)`
 defaults where `{}` silently became the full default - the same class of bug as
 the `AccountHistory` one, with a dict.
 
+## Why the wire rail is not the IBM-trained model
+
+The other repository has a wire model trained on IBM's AML data
+(`artifacts/wire_xgboost.json`, 49 features). Four of those features do not
+exist in a single-bank single-currency simulator - `payment_format`,
+`same_bank`, `currency`, `currency_switch` - but they map cleanly to constants,
+so importing it is possible. It was tried.
+
+| on the same 1,302 transfers | AUC | recall@2% |
+| --- | --- | --- |
+| IBM-trained model, four features constant | 0.723 | 4.7% |
+| **the hand-written rules** | **0.967** | 4.7% |
+
+The rules win decisively, and the reason is in the model's own feature
+importances: `payment_format` is its **strongest** feature, `same_bank` second,
+`currency_switch` fourth, and together the four carry **31.6% of its total
+gain**. A tree that splits on a constant sends every row down one branch, so
+importing it means running a model with its three best signals flatlined.
+
+The recall column is identical because a 2% flag budget against traffic that is
+42% attacker-touching saturates for any model that can rank 26 attackers first.
+AUC is what separates them here.
+
+So the trained model is not integrated. Retraining that architecture on FinSim
+traffic with 45 real features is a reasonable thing to try, but it would have to
+beat 0.967 - and the rules have the advantage of being fitted to this traffic
+rather than to a different payment network.
+
 ## The shipped model, and the retrain button
 
 `models/card.pt` is committed - 12 MB - so the branch can be cloned and run
