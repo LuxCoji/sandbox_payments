@@ -152,41 +152,58 @@ emitting anything. The wire rail therefore sees no organic transfer traffic. Tha
 is the simulator's own behaviour and this integration does not reach in and
 change it.
 
-## What the card model measures, and why the headline number is not one
+## The card model's numbers are measuring the fixture, not the model
+
+**Do not quote any accuracy figure from the simulator runs.** With the loss bug
+fixed, all nine runs returned **AUC 1.000 and PR-AUC 1.000** - a perfect
+separation, which on real fraud does not happen. It is a leak in the traffic
+generator, and finding it is worth more than the number would have been.
+
+Two causes, both in the harness rather than the rails:
+
+**The attackers spend too consistently.** `amount_over_account_mean` compares a
+payment with the account's own average. Scripted attacks send near-identical
+amounts, so that ratio sits in [0.87, 1.13] for **every one of 1,386 fraudulent
+transactions**, while genuine accounts range far wider. One feature answers the
+question outright.
+
+**Thirty attacker accounts against 776 genuine ones.** Each attacker makes 24 to
+72 transactions, so a model can memorise thirty account signatures rather than
+learn a pattern.
+
+The earlier run, before the loss was fixed, reported 23.06% recall at a 2% flag
+rate with precision 1.000. That was also an artefact: the holdout holds 451
+frauds in 5,202 rows, so a 2% flag budget caps recall at 104/451 = 23.06%
+regardless of model quality.
+
+So there are two honest statements and no accuracy claim:
+
+- **The pipeline works.** Collect, train, save, load, score live, threshold,
+  flag - verified end to end, and the model blocks and challenges real payments
+  through the API.
+- **How well it detects fraud is unknown.** The fixture cannot answer it. Only
+  the red team can.
+
+Fixing the generator means: attackers drawn from the same population as
+everyone else rather than created fresh, amounts varying as much within an
+attack as between honest payments, and far more attacker accounts each doing
+far less. That is a harness change, and the harness is scratch code outside this
+repository.
+
+## What the pipeline demonstrates
 
 Trained on 26,007 simulator transactions with 1,386 fraud (5.3%), three
 configurations, three seeds each. The model loads, scores live traffic, and the
 amount-aware bands fire: on a short run it blocked 9 payments and challenged 2
 out of 418, a 2.6% flag rate.
 
-**The recall figure it reports is an artefact and should not be quoted.** Every
-one of the nine runs returned exactly 23.06% recall at a 2% flag rate, with zero
-spread. That is not nine models agreeing; it is arithmetic. Precision was
-**1.000 in every run** - every flagged transaction was fraud - and the holdout
-holds 451 frauds in 5,202 rows. Flagging 2% means flagging 104 transactions, so
-104/451 = 23.06% is the ceiling any model hits once it can rank 104 frauds at
-the top. The operating point, not the model, is the binding constraint.
+A model trained on 26,007 simulator transactions loads, scores live traffic, and
+the amount-aware bands fire: on a short run it blocked 9 payments and challenged
+2 out of 418, a 2.6% flag rate, with a 0.053 bar on one payment and 0.188 on
+another.
 
-Two things follow, and both matter more than the number:
-
-**The scripted fraud is too easy.** Perfect precision and an AUC reaching
-0.9999 mean the patterns are trivially separable. They were written from the
-red-team playbook, and a model that learns them has learned four specific
-shapes rather than what fraud looks like.
-
-**A 2% flag rate is the wrong operating point for this fixture.** The holdout is
-8.7% fraud, four times the flag budget. Real card fraud runs near 1%; the
-harness over-injected. Where the arms actually differ is at 5%, which ranges 38%
-to 58%.
-
-So the model is real, the pipeline is verified end to end, and **the number that
-would tell you whether any of this works does not exist yet**. It comes from the
-red team, attacking patterns the model has never seen.
-
-One measured aside: pretraining did **not** help here. The no-pretrain arm took
-the best AUC. On IEEE-CIS's 590,540 rows it was the only lever that paid; on
-26,007 it does not, which is consistent with a self-supervised phase needing
-volume.
+That is a statement about the plumbing. It is not a statement about accuracy,
+for the reasons above.
 
 ## Findings from a review of this branch
 
