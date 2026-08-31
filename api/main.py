@@ -652,3 +652,32 @@ async def list_decisions():
     log = _case_log()
     return {"decisions": [d.to_dict() for d in log.all()[-50:]][::-1],
             "summary": summarise(log)}
+
+
+# ── Serving the dashboard ─────────────────────────────────────────────────
+#
+# Mounted last, and only when a build exists. The frontend calls `/api/...` on
+# its own origin, so serving it from this process means one URL and no CORS
+# rules to keep in step with a second service.
+#
+# Every route above is already registered, so the catch-all below cannot shadow
+# one - but an unknown `/api/...` path must still 404 rather than fall through
+# to index.html, or a typo'd endpoint returns a page and reads as a frontend bug.
+
+_STATIC = Path(__file__).resolve().parents[1] / "static"
+
+if _STATIC.is_dir():
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/assets", StaticFiles(directory=_STATIC / "assets"), name="assets")
+
+    @app.get("/{path:path}")
+    async def dashboard(path: str):
+        """The single-page app, and its client-side routes."""
+        if path.startswith("api/"):
+            raise HTTPException(404, "no such endpoint")
+        candidate = _STATIC / path
+        if path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(_STATIC / "index.html")
