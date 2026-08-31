@@ -100,7 +100,9 @@ Everything below is built and tested. Only the traffic is missing.
 ```bash
 # 1. Collect. The card history is maintained even by the untrained scorer,
 #    which is what makes it training data.
-FINSIM_ENABLE_RISK=1 FINSIM_TRAFFIC_LOG=runs/traffic.jsonl     python -m sim.main run-seed
+export FINSIM_ENABLE_RISK=1
+export FINSIM_TRAFFIC_LOG=runs/traffic.jsonl
+python -m sim.main run-seed
 
 # 2. Train. Pretrains without labels, then fine-tunes on the labelled fraud.
 python -m risk.card.training --traffic runs/traffic.jsonl --out models/card.pt
