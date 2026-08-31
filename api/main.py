@@ -10,6 +10,9 @@ Run with:  uv run uvicorn api.main:app --reload --port 8000
 from __future__ import annotations
 
 import asyncio
+import uuid
+SERVER_RUN_ID = uuid.uuid4().hex
+
 import dataclasses
 from contextlib import asynccontextmanager
 
@@ -93,9 +96,13 @@ def _list_redteam_branches() -> list[dict]:
         return []
 
     with chrono.conn.cursor() as cur:
+        # Join with checkpoints to find the exact event number this branch was forked from,
+        # and the metadata to see which demo checkpoint it originated from.
         cur.execute(
-            "SELECT branch_id, head_seq_num, created_at_ns FROM branches "
-            "WHERE branch_id LIKE 'red-team/%' ORDER BY created_at_ns"
+            '''SELECT b.branch_id, b.head_seq_num, b.created_at_ns, c.event_number, c.metadata
+               FROM branches b
+               LEFT JOIN checkpoints c ON b.parent_checkpoint_id = c.checkpoint_id
+               WHERE b.branch_id LIKE 'red-team/%' ORDER BY b.created_at_ns'''
         )
         rows = cur.fetchall()
         cur.execute(
@@ -105,20 +112,24 @@ def _list_redteam_branches() -> list[dict]:
         for branch_id, event_number in cur.fetchall():
             checkpoints_by_branch.setdefault(branch_id, []).append(event_number)
 
+    demo_checkpoints = set(_session().dag._checkpoints_by_id.keys())
+
     return [
         {
             "branch_id": branch_id,
             "name": f"🔴 {branch_id.removeprefix('red-team/')}",
-            "parent_branch_id": None,
+            # Only attach to 'main' if the origin checkpoint actually exists in THIS session's memory
+            "parent_branch_id": "main" if (c_meta and c_meta.get("server_run_id") == SERVER_RUN_ID) else None,
             "parent_checkpoint_id": None,
-            "fork_seq_num": 0,
+            "fork_seq_num": fork_seq_num or 0,
             "head_seq_num": head_seq_num,
             "live": False,  # forked branches never auto-run — static except for agent actions
             "seed_offset": 0,
             "created_at_ns": created_at_ns,
             "checkpoint_seq_nums": sorted(checkpoints_by_branch.get(branch_id, [])),
+            "commit_reasoning": c_meta.get("commit_reasoning", "No reasoning recorded") if c_meta else "No reasoning recorded"
         }
-        for branch_id, head_seq_num, created_at_ns in rows
+        for branch_id, head_seq_num, created_at_ns, fork_seq_num, c_meta in rows
     ]
 
 
@@ -290,7 +301,7 @@ def _export_checkpoint_to_postgres(checkpoint_id: str) -> str:
         state_hash=engine.get_state_hash(),
         aggregate_snapshot=engine.get_full_snapshot_bytes(),
         rng_state=engine._rng.get_state(),
-        metadata={"source": "demo_bridge", "origin_checkpoint": checkpoint_id},
+        metadata={"source": "demo_bridge", "origin_checkpoint": checkpoint_id, "server_run_id": SERVER_RUN_ID},
     )
     return checkpoint.checkpoint_id
 

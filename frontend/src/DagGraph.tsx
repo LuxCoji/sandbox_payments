@@ -63,6 +63,19 @@ export default function DagGraph({ branches, selectedBranch, onSelect, onCheckpo
               />
             )}
 
+            {/* lane line glow (prevents SVG zero-height bounding box clip bug) */}
+            {branch.branch_id === "main" && (
+              <line
+                x1={x0}
+                y1={y}
+                x2={x1}
+                y2={y}
+                stroke={color}
+                strokeWidth={12}
+                strokeOpacity={0.15}
+              />
+            )}
+
             {/* lane line */}
             <line
               x1={x0}
@@ -70,7 +83,7 @@ export default function DagGraph({ branches, selectedBranch, onSelect, onCheckpo
               x2={x1}
               y2={y}
               stroke={color}
-              strokeWidth={selected ? 3 : 2}
+              strokeWidth={branch.branch_id === "main" ? (selected ? 4 : 3) : (selected ? 3 : 2)}
               strokeOpacity={branch.live ? 1 : 0.6}
               strokeDasharray={branch.live ? undefined : "3 4"}
             />
@@ -88,9 +101,9 @@ export default function DagGraph({ branches, selectedBranch, onSelect, onCheckpo
                   <animate attributeName="opacity" values="1;0.3;1" dur="1.6s" repeatCount="indefinite" />
                 </circle>
               )}
-              <text x={branch.live ? 30 : 18} y={y + 4} fontFamily="JetBrains Mono, monospace" fontSize={11.5}
-                fontWeight={selected ? 700 : 500} fill={selected ? color : "#c7cedb"}>
-                {branch.name}
+              <text x={branch.live ? 30 : 18} y={y + 4} fontFamily="JetBrains Mono, monospace" fontSize={branch.branch_id === "main" ? 13 : 11.5}
+                fontWeight={branch.branch_id === "main" ? 800 : (selected ? 700 : 500)} fill={selected ? color : "#c7cedb"}>
+                {branch.branch_id === "main" ? "MAIN BRANCH" : branch.name}
               </text>
             </g>
 
