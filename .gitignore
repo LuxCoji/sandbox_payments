@@ -40,3 +40,8 @@ frontend/dist/
 
 # Red-team harness — local persona identity bookkeeping (not simulation state)
 agents/redteam/.persona_identity.json
+
+# Collected simulator traffic and trained models. Generated, large, and
+# reproducible from a seed - the recipe belongs in git, the output does not.
+runs/
+models/
