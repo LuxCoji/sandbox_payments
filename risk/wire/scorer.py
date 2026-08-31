@@ -26,6 +26,7 @@ precision it has not measured.
 """
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, replace
 
 from risk.wire.graph import AccountStructure, TransferGraph
@@ -37,6 +38,28 @@ from sim.core.interfaces import (
 )
 
 RAIL = "wire"
+
+# One day. The per-account cap the engine enforces is daily, so the aggregate
+# that defeats it is measured over the same period.
+OWNER_WINDOW_NS = 24 * 3_600 * 1_000_000_000
+
+
+# Two kinds of signal, weighted differently on purpose.
+#
+# A **structural inference** - a shape in the graph that laundering tends to
+# produce and ordinary business sometimes also produces. Fan-out looks like a
+# payroll run; a cycle looks like a supply chain. None of these is worth a
+# reviewer's time alone, so each carries about a third of the bar and a case
+# needs two of them.
+#
+# A **quantitative fact** - a stated limit, breached, with the number attached.
+# "This account was credited 32,000 rupees in six hours" is not an inference
+# about intent; it either happened or it did not. The red-team playbook is
+# explicit that these are the findings ("always carry a NUMBER: a total, a
+# ratio, a rate"), and a rail that needs two of them before saying anything
+# would miss the single-primitive attacks it is built to catch.
+INFERENCE = 0.30
+FACT = 0.60
 
 
 @dataclass(frozen=True)
@@ -84,6 +107,18 @@ class WireThresholds:
     cycle_hours: float = 24.0
     cycle_max_length: int = 4
 
+    # What one owner may move across all of its accounts inside a day before
+    # it is worth a look. Set well above an ordinary person's daily activity -
+    # this is meant to catch an actor operating a fleet of accounts, not
+    # somebody paying rent.
+    owner_volume_paise: int = 5_000_000        # 50,000 rupees
+
+    # Value arriving at one account inside the tight window. `fan_in` counts
+    # *payers*; this counts money. An account credited far beyond what its own
+    # tier would let it send is the mule-account primitive, and counting
+    # distinct senders misses it whenever the value arrives from few sources.
+    received_burst_paise: int = 2_000_000      # 20,000 rupees
+
     # Paying into an account that is not live. A frozen or disputed account is
     # under review already, and a closed one should not be receiving money at
     # all - so a transfer into either is worth a look regardless of shape.
@@ -115,18 +150,39 @@ class WireThresholds:
 
 def calibrate(transfers, target_flag_rate: float = 0.02,
               thresholds: WireThresholds | None = None) -> WireThresholds:
-    """Choose `review_at` so a known share of normal traffic is flagged.
+    """Fit the thresholds to observed traffic instead of guessing them.
 
     Review capacity is the real constraint - a team can look at so many cases a
     day and no more - so the useful question is "what bar spends exactly that
-    budget", not "what number feels suspicious". This replays traffic, collects
-    the score every transfer would have received, and returns thresholds whose
-    bar sits at the requested percentile.
+    budget", not "what number feels suspicious".
+
+    **The value thresholds are fitted too, and have to be.** A limit written in
+    rupees is a guess about a currency and an economy. Measured on simulator
+    traffic, the hand-set 50,000-rupee owner limit sat *below* what an ordinary
+    account moves in a day and *above* what a mule chain moves in six legs - so
+    it flagged the honest population and missed every attacker. A percentile of
+    what this population actually does cannot make that mistake: it is defined
+    relative to the traffic rather than to an amount someone imagined.
 
     Pass traffic **without** known fraud in it. Calibrating on a mixture sets
     the bar above some of the fraud, which is the opposite of what it is for.
     """
     thresholds = thresholds or WireThresholds()
+
+    # The value limits are fitted first, then the bar is fitted against the
+    # scores they produce. Order matters: fitting the bar against scores from
+    # guessed limits sets it for a distribution that will not exist once the
+    # limits move.
+    #
+    # The percentile is derived from the flag-rate budget rather than fixed. A
+    # value signal weighs as a fact, so any transfer crossing a value limit
+    # raises a case on its own - which means the share of traffic above the
+    # limit *is* roughly the flag rate. A fixed 0.995 measured 14% flagged,
+    # because in this traffic many accounts legitimately cross a 99.5th
+    # percentile inside a six-hour window.
+    value_percentile = 1.0 - target_flag_rate / 2
+    thresholds = _fit_value_thresholds(transfers, thresholds, value_percentile)
+
     scorer = WireScorer(thresholds=thresholds)
     scores = sorted((scorer.assess(t).score for t in transfers), reverse=True)
 
@@ -147,6 +203,47 @@ def calibrate(transfers, target_flag_rate: float = 0.02,
     return replace(thresholds, review_at=bar)
 
 
+def _fit_value_thresholds(transfers, thresholds: WireThresholds,
+                          percentile: float) -> WireThresholds:
+    """Set the value limits above what this population ordinarily does.
+
+    The percentile comes from the flag-rate budget, because a value signal
+    weighs as a fact and raises a case on its own - so the share of traffic
+    above a limit is roughly the share flagged by it. Half the budget is
+    allocated to the value signals, leaving the rest for the structural ones.
+
+    Fitted on clean traffic, "ordinary" is exactly what the sample contains.
+    """
+    observer = WireScorer(thresholds=thresholds)
+    received: list[int] = []
+    owner_moved: list[int] = []
+
+    for context in transfers:
+        observer.observe(context)
+        structure = observer.graph.structure(context.destination_account_id,
+                                             context.sim_time_ns)
+        received.append(structure.received_burst)
+        if context.source_owner_id:
+            value, _ = observer.owner_volume(context.source_owner_id,
+                                             context.sim_time_ns)
+            owner_moved.append(value)
+
+    def at(values: list[int], fallback: int) -> int:
+        if not values:
+            return fallback
+        ordered = sorted(values)
+        index = min(int(len(ordered) * percentile), len(ordered) - 1)
+        # Strictly above the percentile, so the observed value that defined it
+        # is itself not flagged.
+        return max(ordered[index] + 1, 1)
+
+    return replace(
+        thresholds,
+        received_burst_paise=at(received, thresholds.received_burst_paise),
+        owner_volume_paise=at(owner_moved, thresholds.owner_volume_paise),
+    )
+
+
 class WireScorer:
     """Watches every transfer and raises cases on structure. Blocks nothing."""
 
@@ -156,11 +253,38 @@ class WireScorer:
         # empty graph is falsy and `or` would quietly replace it.
         self.graph = TransferGraph() if graph is None else graph
         self.thresholds = thresholds or WireThresholds()
+        # Value moved per owner inside the rolling window, and per account.
+        # The engine caps a single account's daily volume and nothing sums what
+        # one actor moved across every account it controls - so an attacker
+        # provisions several accounts, keeps each individually legal, and moves
+        # a total no single cap would ever have allowed. The graph cannot see
+        # this: ownership is not an edge.
+        self._owner_sent: dict[str, list[tuple[float, int]]] = defaultdict(list)
 
     def observe(self, context: RiskContext) -> None:
         """Fold a transfer into the graph without scoring it."""
         self.graph.add(context.source_account_id, context.destination_account_id,
                        context.amount_paise, context.sim_time_ns)
+        if context.source_owner_id:
+            self._record_owner_volume(context)
+
+    def _record_owner_volume(self, context: RiskContext) -> None:
+        """Track what one owner moved, across every account it controls."""
+        moves = self._owner_sent[context.source_owner_id]
+        moves.append((context.sim_time_ns, context.amount_paise))
+        # Trimmed to the same window the graph keeps, so this cannot grow
+        # without bound any more than the graph does.
+        cutoff = context.sim_time_ns - OWNER_WINDOW_NS
+        while moves and moves[0][0] < cutoff:
+            moves.pop(0)
+        if not moves:
+            del self._owner_sent[context.source_owner_id]
+
+    def owner_volume(self, owner_id: str, now_ns: float) -> tuple[int, int]:
+        """(value, count) this owner moved inside the window."""
+        cutoff = now_ns - OWNER_WINDOW_NS
+        moves = [m for m in self._owner_sent.get(owner_id, []) if m[0] >= cutoff]
+        return sum(m[1] for m in moves), len(moves)
 
     def assess(self, context: RiskContext) -> RiskDecision:
         """Record the transfer, then judge the accounts on both ends.
@@ -198,6 +322,18 @@ class WireScorer:
         signals: list[Signal] = []
         limits = self.thresholds
 
+        # What this owner has moved across every account it controls. The
+        # per-account daily cap says nothing about this total, which is exactly
+        # the gap: every individual transfer is legal and the sum is not.
+        if context.source_owner_id:
+            value, count = self.owner_volume(context.source_owner_id,
+                                             context.sim_time_ns)
+            if value >= limits.owner_volume_paise:
+                signals.append(Signal(
+                    "owner_volume", FACT,
+                    f"sender's owner moved {value / 100:,.0f} across "
+                    f"{count} transfers in a day"))
+
         status = context.destination_status
         if status is not None and status is not AccountStatus.ACTIVE:
             signals.append(Signal(
@@ -229,17 +365,23 @@ class WireScorer:
 
         if structure.fan_out_burst >= limits.fan_out_burst:
             signals.append(Signal(
-                "fan_out", 0.30,
+                "fan_out", INFERENCE,
                 f"{side} paid {structure.fan_out_burst} accounts within six hours"))
 
         if structure.fan_in_burst >= limits.fan_in_burst:
             signals.append(Signal(
-                "fan_in", 0.30,
+                "fan_in", INFERENCE,
                 f"{side} was paid by {structure.fan_in_burst} accounts within six hours"))
+
+        if structure.received_burst >= limits.received_burst_paise:
+            signals.append(Signal(
+                "received_burst", FACT,
+                f"{side} was credited {structure.received_burst / 100:,.0f} "
+                f"within six hours"))
 
         if structure.sent_burst >= limits.sent_burst:
             signals.append(Signal(
-                "send_burst", 0.30,
+                "send_burst", FACT,
                 f"{side} made {structure.sent_burst} transfers within six hours"))
 
         # Gated on the cycle existing, not on its speed being above zero. A

@@ -688,6 +688,16 @@ class WorldEngineImpl:
             return events
 
         tx_id = self._next_tx_id()
+
+        # Cash-out is the exit. Laundering ends here - value pools in a mule
+        # account and leaves the system - and the rails were watching the money
+        # arrive and then losing sight of it at the one moment that completes
+        # the pattern. Advisory like the wire rail: the result is not read,
+        # because stopping a withdrawal on a model's say-so has the same
+        # precision problem and the same tipping-off exposure as stopping a
+        # transfer.
+        self._assess_risk(command, tx_id, src)
+
         events.append(self._create_event(
             AccountDebited, actor_id=command.actor_id,
             account_id=src.account_id, amount_paise=command.amount_paise,

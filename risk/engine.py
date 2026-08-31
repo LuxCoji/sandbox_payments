@@ -41,8 +41,13 @@ from sim.core.interfaces import (
 log = logging.getLogger(__name__)
 
 # Transaction types that reach a rail at all.
+#
+# CASH_OUT belongs on the wire rail because it is where laundering *ends*.
+# Value pools in a mule account and leaves the system, and a rail that watched
+# the money arrive but not depart lost sight of it at the one moment that
+# completes the pattern - which is also the moment a reviewer most needs to see.
 CARD_TYPES = frozenset({TransactionType.PAYMENT})
-WIRE_TYPES = frozenset({TransactionType.TRANSFER})
+WIRE_TYPES = frozenset({TransactionType.TRANSFER, TransactionType.CASH_OUT})
 
 # Stale accounts are swept out of the card history on a schedule rather than on
 # every transaction, because a sweep over every account per payment would make

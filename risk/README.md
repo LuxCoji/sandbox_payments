@@ -129,7 +129,28 @@ from the clean run and never re-fitted.
 | | |
 | --- | --- |
 | false alarms on legitimate traffic | 0.53% |
-| precision on the cases it raised | 28.6% |
+| precision on the cases it raised | **87.4%** |
+
+Precision was 28.6% until the thresholds stopped being guesses. Two changes got
+it there, and the second is the one that mattered.
+
+**Not every signal deserves the same weight.** A structural inference - fan-out
+looks like a payroll run, a cycle looks like a supply chain - is worth about a
+third of the bar, so a case needs two of them. A quantitative fact - "this
+account was credited 32,000 rupees in six hours" - is not an inference about
+intent, and a rail that demanded two of those would miss the single-primitive
+attacks it exists to catch. The red-team playbook is explicit that findings
+"always carry a NUMBER", so the rail now weighs numbers accordingly.
+
+**Value limits written in rupees are guesses about an economy.** The hand-set
+50,000-rupee owner limit sat *below* what an ordinary account moves in a day and
+*above* what a mule chain moves in six legs - so it flagged the honest
+population and missed every attacker, scoring 0% precision. `calibrate()` now
+fits the value limits from the traffic itself, at a percentile derived from the
+flag-rate budget rather than a fixed one: a value signal raises a case alone, so
+the share of traffic above a limit *is* roughly the share flagged by it. A fixed
+99.5th percentile measured 14% flagged; deriving it from the budget gives
+0.53%.
 
 Two bugs were found getting there, and both are worth knowing:
 
@@ -243,6 +264,65 @@ counters unable to reconcile when a rail raised; the case list was unbounded;
 stamped the default shape onto non-default weights; and two `dict(x or default)`
 defaults where `{}` silently became the full default - the same class of bug as
 the `AccountHistory` one, with a dict.
+
+## Why the wire rail is not the IBM-trained model
+
+The other repository has a wire model trained on IBM's AML data
+(`artifacts/wire_xgboost.json`, 49 features). Four of those features do not
+exist in a single-bank single-currency simulator - `payment_format`,
+`same_bank`, `currency`, `currency_switch` - but they map cleanly to constants,
+so importing it is possible. It was tried.
+
+| on the same 1,302 transfers | AUC | recall@2% |
+| --- | --- | --- |
+| IBM-trained model, four features constant | 0.723 | 4.7% |
+| **the hand-written rules** | **0.967** | 4.7% |
+
+The rules win decisively, and the reason is in the model's own feature
+importances: `payment_format` is its **strongest** feature, `same_bank` second,
+`currency_switch` fourth, and together the four carry **31.6% of its total
+gain**. A tree that splits on a constant sends every row down one branch, so
+importing it means running a model with its three best signals flatlined.
+
+The recall column is identical because a 2% flag budget against traffic that is
+42% attacker-touching saturates for any model that can rank 26 attackers first.
+AUC is what separates them here.
+
+So the trained model is not integrated. Retraining that architecture on FinSim
+traffic with 45 real features is a reasonable thing to try, but it would have to
+beat 0.967 - and the rules have the advantage of being fitted to this traffic
+rather than to a different payment network.
+
+## The shipped model, and the retrain button
+
+`models/card.pt` is committed - 12 MB - so the branch can be cloned and run
+without training anything first. A checkpoint is generated output and does not
+belong in git as a rule, but a branch nobody can run is worth less than the rule
+is worth keeping.
+
+**The wire rail has no model and needs none.** Cycles, pass-through ratios,
+burst counts and owner aggregation are computed from the graph, so that rail
+works on a fresh clone with nothing downloaded.
+
+The dashboard has a **Retrain** button. It does **not** make the model learn
+continuously from live traffic, and that is deliberate:
+
+**A model that learns from its own decisions can be taught.** If "allowed" is
+treated as "genuine", every fraud that gets through becomes a training example
+saying that shape is fine - so an attacker who finds one working attack widens
+it by repetition, and the system is trained by the person it is defending
+against.
+
+**A blocked transaction never reveals whether it was fraud.** The model would
+only ever learn from what it let through, biasing it toward whatever it already
+believed - and that drift is invisible, because the loss falls and the flag rate
+holds while recall decays.
+
+So the button retrains a candidate on accumulated *labelled* traffic, scores the
+candidate **and the live model** on a period neither trained on, and promotes
+only if the candidate wins by more than a point. Rejected candidates are kept -
+they are evidence about what does not work. Every promotion can be rolled back,
+because a holdout is a period rather than the future.
 
 ## What is still to do
 

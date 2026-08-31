@@ -11,18 +11,20 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from pathlib import Path
 SERVER_RUN_ID = uuid.uuid4().hex
 
 import dataclasses
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from api.redteam_session import RedTeamObserver
 from api.sim_session import SimSession
+from sim.config import SimConfig
 
 session: SimSession | None = None
 redteam_observer = RedTeamObserver()
@@ -456,3 +458,80 @@ async def risk_console():
     return HTMLResponse(render(
         summary, cases, card_model_loaded=summary.get("card_model_loaded", False),
         run_label="live session"))
+
+
+# ── Retraining ────────────────────────────────────────────────────────────
+#
+# The button on the dashboard calls this. It does **not** make the model learn
+# continuously from live traffic - see `risk/registry.py` for why that is the
+# wrong thing to build. It trains a candidate, scores it and the live model on
+# the same held-out period, and promotes only if the candidate wins.
+#
+# Training takes minutes, so the endpoint starts the work and returns. The
+# dashboard polls for the outcome rather than holding a request open.
+
+_retrain_state: dict = {"status": "idle", "result": None, "error": None}
+
+
+def _run_retrain(traffic: Path, models: Path) -> None:
+    from risk.retrain import NotEnoughData, retrain
+
+    try:
+        _retrain_state["result"] = retrain(traffic, models)
+        _retrain_state["status"] = "done"
+    except NotEnoughData as exc:
+        # Not an error. Declining to retrain on a sample too small to measure
+        # is the system working, and the dashboard says so in those words.
+        _retrain_state["status"] = "declined"
+        _retrain_state["error"] = str(exc)
+    except Exception as exc:
+        _retrain_state["status"] = "failed"
+        _retrain_state["error"] = f"{type(exc).__name__}: {exc}"
+
+
+@app.post("/api/risk/retrain")
+async def start_retrain(background: BackgroundTasks):
+    """Train a candidate from collected traffic and promote it if it wins."""
+    if _retrain_state["status"] == "running":
+        raise HTTPException(409, "a retrain is already running")
+
+    config = SimConfig()
+    traffic = config.traffic_log or Path("runs/traffic.jsonl")
+    if not Path(traffic).exists():
+        raise HTTPException(
+            400, f"no collected traffic at {traffic}. Set FINSIM_TRAFFIC_LOG "
+                 f"and run the simulation - a model cannot be retrained on "
+                 f"traffic nobody recorded.")
+
+    _retrain_state.update(status="running", result=None, error=None)
+    background.add_task(_run_retrain, Path(traffic),
+                        Path(config.card_model_path).parent)
+    return {"status": "running"}
+
+
+@app.get("/api/risk/retrain")
+async def retrain_status():
+    """Where the last retrain got to, and what it decided."""
+    from risk.registry import Registry
+
+    config = SimConfig()
+    registry = Registry.load(Path(config.card_model_path).parent)
+    return {**_retrain_state, "registry": registry.summary()}
+
+
+@app.post("/api/risk/rollback")
+async def rollback_model():
+    """Put the previous promoted model back.
+
+    A promotion that looked right on a holdout can still be wrong in
+    production - a holdout is a period, not the future.
+    """
+    from risk.registry import Registry
+
+    config = SimConfig()
+    registry = Registry.load(Path(config.card_model_path).parent)
+    previous = registry.rollback()
+    if previous is None:
+        raise HTTPException(400, "no earlier promoted model to roll back to")
+    return {"rolled_back_to": previous.to_dict(),
+            "note": "restart the session to load it"}

@@ -11,6 +11,8 @@ simulator's traffic yet, and a test cannot manufacture one.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -1048,3 +1050,212 @@ def test_the_engine_supplies_the_new_fields():
     assert context.source_owner_id == "user1"
     assert context.destination_owner_id == "user2"
     assert context.destination_status is AccountStatus.ACTIVE
+
+
+# --- the red-team playbook, pattern by pattern -------------------------------
+#
+# `agents/redteam/personas.py` tells the attacker exactly which eight gaps to
+# aim at. Each test below drives one of them and asserts the rails notice.
+# These are the patterns the system will actually be attacked with, so "a
+# detector exists" is not enough - it has to fire on the shape as described.
+
+def transfer(source, destination, amount, at_ns, owner=None, dest_owner=None,
+             tx_type=TransactionType.TRANSFER):
+    from sim.core.interfaces import RiskContext
+
+    return RiskContext(
+        tx_id=f"tx-{at_ns}", tx_type=tx_type, actor_id=owner or f"owner-{source}",
+        source_account_id=source, destination_account_id=destination,
+        amount_paise=amount, sim_time_ns=at_ns, gateway_id="gw",
+        device_type=DeviceType.MOBILE, source_account_type=AccountType.PERSONAL,
+        source_kyc_level=1, source_owner_id=owner or f"owner-{source}",
+        destination_owner_id=dest_owner or f"owner-{destination}")
+
+
+def test_playbook_1_unbounded_inbound_value():
+    """"Drive far more value into an account than its tier could ever send."
+
+    `fan_in` counts *payers*, so value arriving from two accounts registers on
+    nothing. This is the playbook's opening gap and the mule primitive.
+    """
+    scorer = WireScorer()
+    decision = None
+    for i in range(4):
+        decision = scorer.assess(transfer(f"payer{i % 2}", "mule",
+                                          800_000, i * 60e9))
+
+    structure = scorer.graph.structure("mule", 4 * 60e9)
+    assert structure.fan_in_burst == 2, "only two distinct payers"
+    assert structure.received_burst == 3_200_000, "but a large sum arrived"
+    assert decision.action is RiskAction.REVIEW
+
+
+def test_playbook_3_one_owner_many_accounts():
+    """"A total, moved by you, that exceeds any single account's allowance."
+
+    Every transfer is individually legal and from a different account. Only
+    summing per owner shows it.
+    """
+    scorer = WireScorer()
+    decision = None
+    for i in range(6):
+        # Six accounts, one owner, each moving a modest amount to a stranger.
+        decision = scorer.assess(transfer(f"acct{i}", f"other{i}", 1_000_000,
+                                          i * 600e9, owner="attacker"))
+
+    value, count = scorer.owner_volume("attacker", 6 * 600e9)
+    assert value == 6_000_000 and count == 6
+    assert decision.action is RiskAction.REVIEW
+    assert "owner moved" in decision.reason
+
+
+def test_playbook_7_cash_out_is_seen():
+    """"Value reconverging into one account and leaving."
+
+    The exit leg was not scored at all, so the rails watched money pool up and
+    then lost sight of it at the moment the pattern completes.
+    """
+    from risk.engine import WIRE_TYPES
+
+    assert TransactionType.CASH_OUT in WIRE_TYPES, (
+        "cash-out is where laundering ends; a rail that cannot see it watches "
+        "the money arrive and never leave")
+
+    engine = FraudRiskEngine()
+    decision = engine.assess(transfer("mule", "CASH_ENTITY", 500_000, 0.0,
+                                      tx_type=TransactionType.CASH_OUT))
+    assert decision.rail == "wire", "cash-out reached no rail"
+    assert engine.summary()["scored"] == 1
+
+
+def test_playbook_4_and_5_rolling_windows_and_counts():
+    """"Counters reset on the sim-day boundary" and "count is never enforced".
+
+    Every window here rolls, so there is no boundary to wait for, and
+    `send_burst` counts transactions where the engine only caps value.
+    """
+    scorer = WireScorer()
+    decision = None
+    # Fifteen sends, each individually small, across a single day boundary.
+    for i in range(15):
+        decision = scorer.assess(transfer("attacker", f"dest{i % 3}", 90_000,
+                                          i * 1200e9))
+
+    assert decision.action is RiskAction.REVIEW, (
+        "a fifteen-transfer burst crossing a day boundary must still register")
+
+
+def test_the_red_team_runs_defended_by_default():
+    """An attack against a system with the controls off measures nothing.
+
+    Risk is off by default everywhere else, which keeps the engine
+    byte-identical for replay tests. The red-team entry point is the one place
+    that default is wrong.
+    """
+    import subprocess
+    import sys
+
+    source = Path(__file__).resolve().parents[2] / "scripts" / "red_team_run.py"
+    text = source.read_text(encoding="utf-8")
+    assert "enable_risk=not args.no_risk" in text, (
+        "the red-team runner must enable the rails unless asked not to")
+    assert "--no-risk" in text, "there must be a way to run undefended on purpose"
+
+
+# --- retraining, and the gate a candidate has to clear -----------------------
+
+def test_a_candidate_must_beat_the_live_model_on_the_same_holdout(tmp_path):
+    """Comparing against a stored number compares measurements, not models.
+
+    The recall on a Version came from a different period against a different
+    vocabulary. A candidate gated on that can win because the traffic moved.
+    """
+    from risk.registry import MIN_IMPROVEMENT, Registry
+
+    registry = Registry.load(tmp_path)
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"not a real checkpoint")
+
+    first = registry.consider(weights, candidate_recall=0.40, rows=5000, fraud=200)
+    assert first.promoted, "the first model has nothing to beat"
+
+    # Scored 0.60 in its own run, but 0.41 on this holdout - barely above the
+    # live model's 0.405 on the same rows. That is noise, not an improvement.
+    close = registry.consider(weights, candidate_recall=0.41, rows=5000,
+                              fraud=200, live_recall=0.405)
+    assert not close.promoted
+    assert "did not beat" in close.reason
+
+    clear = registry.consider(weights, candidate_recall=0.50, rows=5000,
+                              fraud=200, live_recall=0.405)
+    assert clear.promoted
+    assert clear.replaced_version == 1
+
+
+def test_a_rejected_candidate_is_kept(tmp_path):
+    """Evidence about what does not work, so it is not retried blind."""
+    from risk.registry import Registry
+
+    registry = Registry.load(tmp_path)
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"x")
+
+    registry.consider(weights, 0.40, rows=5000, fraud=200)
+    registry.consider(weights, 0.401, rows=5000, fraud=200, live_recall=0.40)
+
+    assert len(registry.versions) == 2
+    assert (tmp_path / "card-v2.pt").exists(), "the rejected candidate was deleted"
+    assert Registry.load(tmp_path).live.version == 1, "the wrong model went live"
+
+
+def test_rollback_restores_the_previous_model(tmp_path):
+    """A holdout is a period, not the future - a good promotion can still be wrong."""
+    from risk.registry import Registry
+
+    registry = Registry.load(tmp_path)
+    for i, (recall, live) in enumerate([(0.40, None), (0.55, 0.40)]):
+        weights = tmp_path / f"w{i}.pt"
+        weights.write_bytes(f"model-{i}".encode())
+        registry.consider(weights, recall, rows=5000, fraud=200, live_recall=live)
+
+    assert registry.live.version == 2
+    previous = registry.rollback()
+
+    assert previous.version == 1
+    assert registry.live_path.read_bytes() == b"model-0"
+    assert Registry.load(tmp_path).live.version == 1
+
+
+def test_rollback_refuses_when_there_is_nothing_to_go_back_to(tmp_path):
+    from risk.registry import Registry
+
+    registry = Registry.load(tmp_path)
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"x")
+    registry.consider(weights, 0.4, rows=5000, fraud=200)
+
+    assert registry.rollback() is None
+
+
+def test_retraining_refuses_a_sample_too_small_to_measure(tmp_path):
+    """Replacing a working model on a handful of frauds is a coin flip."""
+    import json
+
+    from risk.retrain import NotEnoughData, retrain
+
+    traffic = tmp_path / "traffic.jsonl"
+    with traffic.open("w", encoding="utf-8") as handle:
+        for i in range(50):
+            handle.write(json.dumps({
+                "account_id": "a", "tx_id": f"t{i}", "is_fraud": 0,
+                "observation": _row(i, False)["observation"]}) + "\n")
+
+    with pytest.raises(NotEnoughData, match="sampling noise"):
+        retrain(traffic, tmp_path)
+
+
+def test_recall_on_an_empty_holdout_is_zero_not_a_crash():
+    """A period with no fraud says nothing, and must not promote anything."""
+    from risk.registry import recall_at
+
+    assert recall_at(np.zeros(100, dtype=int), np.random.rand(100)) == 0.0
