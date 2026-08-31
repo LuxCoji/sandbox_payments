@@ -17,7 +17,17 @@ dependencies = [
     "pydantic-settings",
     "psycopg[binary]",
     "networkx",
+    # The card model is a Transformer, so torch is a hard runtime dependency of
+    # `risk`, not an optional extra. It was missing while torch-geometric was
+    # declared - which installs torch as its own dependency and made the gap
+    # invisible until someone pinned a version that did not.
+    "torch",
     "torch-geometric",
+    # The wire rail runs on hand-written rules, but importing and measuring the
+    # IBM-trained model needs xgboost. Kept because that comparison is part of
+    # the evidence, and rerunning it should not need a manual install.
+    "xgboost",
+    "scikit-learn",
     "structlog",
     "opentelemetry-api",
     "opentelemetry-sdk",

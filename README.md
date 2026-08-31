@@ -9,6 +9,10 @@ FinSim models a realistic retail payment ecosystem using discrete-event simulati
 - **Deterministic replay** – identical seeds produce identical state hashes
 - **Branching (ChronoDAG)** – fork simulation state at any point, inject adversarial agents, and diff outcomes. Postgres integration in CI and the ChronoDAG protocol explicitly support resetting and deletion now.
 - **Tool Gateway** – capability-gated, rate-limited API for agent interaction
+- **Fraud detection** – two rails watching the simulation: a sequence model on
+  card payments, and a structural money-laundering rail on transfers and
+  cash-outs. Off by default, on by default for red-team runs. See
+  [docs/fraud_detection.md](docs/fraud_detection.md)
 - **Full observability** – OpenTelemetry traces, Prometheus metrics, structured logging
 
 ## Quick Start
@@ -110,8 +114,23 @@ npm run dev
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for the full system design,
-[docs/interfaces.md](docs/interfaces.md) for contract specifications, and
-[CLAUDE.md](CLAUDE.md) for a codebase orientation aimed at AI coding agents.
+[docs/interfaces.md](docs/interfaces.md) for contract specifications,
+[docs/fraud_detection.md](docs/fraud_detection.md) for the risk rails and what
+they have been measured at, and [CLAUDE.md](CLAUDE.md) for a codebase
+orientation aimed at AI coding agents.
+
+### Turning fraud detection on
+
+```bash
+export FINSIM_ENABLE_RISK=1
+export FINSIM_TRAFFIC_LOG=runs/traffic.jsonl   # optional: collect training data
+python -m sim.main run-seed --seed 42
+```
+
+The dashboard gains a **Fraud** tab. `models/card.pt` is committed, so nothing
+needs training first; the wire rail needs no model at all. Red-team sessions
+(`scripts/red_team_run.py`) arm the rails by default - an attack against a
+system with the controls off measures nothing.
 
 ## Project Structure
 
