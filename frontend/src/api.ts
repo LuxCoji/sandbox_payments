@@ -107,6 +107,10 @@ async function j<T>(res: Response): Promise<T> {
 }
 
 export const api = {
+  riskSummary: (signal?: AbortSignal) =>
+    fetch(`${BASE}/risk/summary`, { signal }).then((r) => j<RiskSummary>(r)),
+  riskCases: (signal?: AbortSignal) =>
+    fetch(`${BASE}/risk/cases`, { signal }).then((r) => j<{ cases: RiskCase[] }>(r)),
   branches: (init?: RequestInit) => fetch(`${BASE}/branches`, init).then((r) => j<BranchNode[]>(r)),
   branchState: (id: string, init?: RequestInit) => fetch(`${BASE}/branches/${id}/state`, init).then((r) => j<BranchState>(r)),
   accounts: (id: string, init?: RequestInit) => fetch(`${BASE}/branches/${id}/accounts`, init).then((r) => j<AccountRow[]>(r)),
@@ -168,3 +172,35 @@ export function redteamWsUrl(sessionId: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${location.host}/api/redteam/stream/${sessionId}`;
 }
+
+/** What the fraud rails report about the live session. */
+export type RiskSummary = {
+  enabled: boolean;
+  /** Whether a trained card model is loaded. Without it the rail allows
+   *  everything, and its counts look identical to a rail finding nothing. */
+  card_model_loaded: boolean;
+  assessed: number;
+  scored: number;
+  allowed: number;
+  stepped_up: number;
+  blocked: number;
+  review: number;
+  flagged: number;
+  flag_rate: number;
+  by_rail: Record<string, number>;
+  open_cases: number;
+  accounts_tracked: number;
+};
+
+/** One flagged transaction, with the evidence that raised it. */
+export type RiskCase = {
+  tx_id: string;
+  rail: "card" | "wire";
+  action: string;
+  score: number;
+  reason: string;
+  amount_paise: number;
+  source_account_id: string;
+  destination_account_id: string;
+  sim_time_ns: number;
+};

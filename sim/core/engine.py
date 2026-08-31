@@ -44,11 +44,16 @@ from sim.core.events import (
 from sim.core.gateway import GatewayEntity
 from sim.core.interfaces import (
     AccountSnapshot,
+    AccountStatus,
     AccountType,
     ActorRole,
     Command,
     CommandResult,
     GlobalParams,
+    RiskAction,
+    RiskContext,
+    RiskDecision,
+    RiskScorer,
     TransactionType,
     WorldView,
 )
@@ -73,12 +78,17 @@ class WorldEngineImpl:
         global_params: GlobalParams | None = None,
         chrono: ChronoDAG | None = None,
         seq_num: int = 0,
+        risk: RiskScorer | None = None,
     ) -> None:
         self._env = env
         self._rng = rng
         self._branch_id = branch_id
         self._chrono = chrono
         self._seq_num: int = seq_num
+        # Injected, never imported: sim must not depend on the risk package.
+        # With None the engine emits exactly what it emitted before risk
+        # scoring existed, so every replay and determinism test stays valid.
+        self._risk = risk
 
         self._accounts: dict[str, Account] = {}
         self._payments: dict[str, Payment] = {}
@@ -467,6 +477,46 @@ class WorldEngineImpl:
         return hashlib.sha256(owner_id.encode()).hexdigest()[:8]
 
     # Handlers
+    def _assess_risk(self, command: Command, tx_id: str, src: Account) -> RiskDecision:
+        """Ask the injected risk scorer about one transaction.
+
+        Returns ALLOW when no scorer is wired, so the engine emits exactly what
+        it emitted before risk scoring existed and every replay and determinism
+        test stays valid.
+
+        A scorer that raises is treated as ALLOW rather than propagating. A risk
+        model is advisory: if it breaks, payments must keep clearing. The
+        alternative - an exception escaping into the command pipeline - turns a
+        bad model into a total outage, which is a worse failure than missing
+        some fraud.
+        """
+        if self._risk is None:
+            return RiskDecision.allow(rail="none")
+
+        device = self._devices.get(command.device_id or "")
+        destination = self._accounts.get(command.target_account_id or "")
+        context = RiskContext(
+            tx_id=tx_id,
+            tx_type=command.action_type,
+            actor_id=command.actor_id,
+            source_account_id=src.account_id,
+            destination_account_id=command.target_account_id or "",
+            amount_paise=command.amount_paise,
+            sim_time_ns=self.sim_time_ns,
+            gateway_id=command.gateway_hint,
+            device_type=device.device_type if device else None,
+            source_account_type=src.account_type,
+            source_kyc_level=src.kyc_level,
+            destination_account_type=destination.account_type if destination else None,
+            destination_status=destination.status if destination else None,
+            source_owner_id=src.owner_id,
+            destination_owner_id=destination.owner_id if destination else "",
+        )
+        try:
+            return self._risk.assess(context)
+        except Exception:
+            return RiskDecision.allow(rail="none", reason="risk scorer raised")
+
     def _execute_transfer(self, command: Command) -> list[DomainEvent]:
         events: list[DomainEvent] = []
         if not command.source_account_id or not command.target_account_id:
@@ -517,6 +567,16 @@ class WorldEngineImpl:
 
         tx_id = self._next_tx_id()
 
+        # The wire rail sees every transfer and stops none of them. Money
+        # laundering detection runs at roughly 12% precision, so an automatic
+        # block would refuse about eight innocent transfers for every real
+        # laundering leg. A flagged transfer is queued for a human instead, and
+        # the freeze that actually holds funds is a separate action a named
+        # reviewer takes. The result is deliberately not read here: the scorer
+        # needs the transfer to build its account graph, and that is the whole
+        # purpose of the call.
+        self._assess_risk(command, tx_id, src)
+
         # Debits and credits
         events.append(self._create_event(
             AccountDebited, actor_id=command.actor_id,
@@ -562,6 +622,17 @@ class WorldEngineImpl:
             events.append(self._create_event(
                 PaymentDeclined, actor_id=command.actor_id, tx_id=tx_id,
                 reason="Insufficient funds", decline_code="INSUFFICIENT_FUNDS"
+            ))
+        elif (risk := self._assess_risk(command, tx_id, src)).action is RiskAction.BLOCK:
+            # Risk is consulted last, after ownership and funds. A payment that
+            # was going to fail anyway must not be scored: it would teach the
+            # model that "declined for no money" looks like fraud, and it would
+            # let an attacker probe the risk system for free with payments they
+            # cannot fund.
+            events.append(self._create_event(
+                PaymentDeclined, actor_id=command.actor_id, tx_id=tx_id,
+                reason=risk.reason or "Blocked by risk assessment",
+                decline_code="RISK_BLOCKED"
             ))
         else:
             events.append(self._create_event(

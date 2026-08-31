@@ -20,10 +20,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import dataclasses
 import os
 import uuid
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 
 from api.live_dag import LiveChronoDAG
 from sim.core.engine import WorldEngineImpl
@@ -49,8 +51,36 @@ class BranchHandle:
     live: bool  # True only for "main" — has an auto-stepping population loop
 
 
+def _build_risk():
+    """The fraud rails for the live session, with a model if one exists.
+
+    Forked branches deliberately do **not** get their own rails. The card
+    history and the account graph are built from the stream a rail has seen,
+    and a fork that started with an empty graph would score its first hour
+    against no history at all - reporting quiet where the parent branch would
+    report a case.
+    """
+    from risk.card.history import AccountHistory
+    from risk.card.scorer import SequenceCardScorer, UntrainedCardScorer
+    from risk.engine import FraudRiskEngine
+
+    history = AccountHistory()
+    model_path = Path(__file__).resolve().parents[1] / "models" / "card.pt"
+
+    if model_path.exists():
+        from risk.card.model import TorchSequenceModel
+
+        card = SequenceCardScorer(model=TorchSequenceModel.load(model_path),
+                                  history=history)
+    else:
+        card = UntrainedCardScorer(history=history)
+
+    return FraudRiskEngine(card_scorer=card, history=history)
+
+
 class SimSession:
-    def __init__(self, seed: int = 42, num_users: int = 60, num_merchants: int = 8) -> None:
+    def __init__(self, seed: int = 42, num_users: int = 60, num_merchants: int = 8,
+                 enable_risk: bool = True) -> None:
         self.dag = LiveChronoDAG()
         self.branches: dict[str, BranchHandle] = {}
         self._task: asyncio.Task | None = None
@@ -66,7 +96,13 @@ class SimSession:
 
         rng = DeterministicRNG.from_seed(seed)
         env = SimulationEnv()
-        engine = WorldEngineImpl(env=env, rng=rng, branch_id="main", chrono=self.dag)
+
+        # The fraud rails watch the live branch. Built here rather than
+        # imported at module scope so a session can run without them, and so
+        # `sim` still never depends on `risk` - this is api, not sim.
+        self.risk = _build_risk() if enable_risk else None
+        engine = WorldEngineImpl(env=env, rng=rng, branch_id="main",
+                                 chrono=self.dag, risk=self.risk)
 
         data_dir = os.path.join(os.path.dirname(__file__), "..", "data", "paysim")
         try:
@@ -121,6 +157,30 @@ class SimSession:
         self._paused = paused
 
     # ── branch inspection ───────────────────────────────────────────
+
+    def risk_summary(self) -> dict:
+        """What the rails have seen and done, plus whether a model is loaded.
+
+        `card_model_loaded` is reported explicitly because a card rail that
+        allows everything and one that finds nothing produce identical counts,
+        and a dashboard showing "0 card cases" should not be ambiguous about
+        which it is.
+        """
+        if self.risk is None:
+            return {"enabled": False}
+
+        from risk.card.scorer import SequenceCardScorer
+
+        return {"enabled": True,
+                "card_model_loaded": isinstance(self.risk.card, SequenceCardScorer),
+                **self.risk.summary()}
+
+    def risk_cases(self, limit: int = 100) -> list[dict]:
+        """The open cases, newest first."""
+        if self.risk is None:
+            return []
+        return [dataclasses.asdict(c)
+                for c in list(self.risk.cases)[-limit:][::-1]]
 
     def branch_summary(self, branch_id: str) -> dict:
         handle = self.branches[branch_id]

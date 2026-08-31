@@ -5,11 +5,12 @@ import LiveFeed from "./LiveFeed";
 import AccountsPanel from "./AccountsPanel";
 import SandboxPanel from "./SandboxPanel";
 import CheckpointsPanel from "./CheckpointsPanel";
+import { FraudPanel } from "./FraudPanel";
 import RedTeamDashboard from "./RedTeamDashboard";
 import Sparkline from "./Sparkline";
 import { formatSimTime, shortId } from "./eventStyle";
 
-type Tab = "feed" | "agents" | "checkpoints" | "sandbox" | "historical";
+type Tab = "feed" | "agents" | "fraud" | "checkpoints" | "sandbox" | "historical";
 type View = "sim" | "redteam";
 
 const MAX_FEED = 150;
@@ -209,6 +210,7 @@ export default function App() {
           <div className="tabs">
             <div className={`tab ${tab === "feed" ? "active" : ""}`} onClick={() => setTab("feed")}>Live Feed</div>
             <div className={`tab ${tab === "agents" ? "active" : ""}`} onClick={() => { setTab("agents"); setSelectedAccount(null); }}>Agents</div>
+            <div className={`tab ${tab === "fraud" ? "active" : ""}`} onClick={() => setTab("fraud")}>Fraud</div>
             <div className={`tab ${tab === "checkpoints" ? "active" : ""}`} onClick={() => setTab("checkpoints")}>Checkpoints</div>
             <div className={`tab ${tab === "sandbox" ? "active" : ""}`} onClick={() => setTab("sandbox")}>Sandbox</div>
             <div className={`tab ${tab === "historical" ? "active" : ""}`} onClick={() => setTab("historical")}>Historical</div>
@@ -223,6 +225,7 @@ export default function App() {
                 onSelect={setSelectedAccount}
               />
             )}
+            {tab === "fraud" && <FraudPanel />}
             {tab === "checkpoints" && (
               <CheckpointsPanel
                 branch={branches.find((b) => b.branch_id === selectedBranch)}

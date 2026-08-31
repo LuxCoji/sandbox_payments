@@ -22,6 +22,17 @@ class SimConfig(BaseSettings):
     otel_endpoint: str | None = None
     prometheus_port: int = 9090
 
+    # Fraud detection is opt-in. Off, the engine emits exactly what it emitted
+    # before the risk seam existed, so every replay, determinism and state-hash
+    # guarantee is untouched by default.
+    enable_risk: bool = False
+    # Where the trained card model lives. When the file is absent the card rail
+    # runs in its untrained state and says so, rather than guessing.
+    card_model_path: Path = Path("models/card.pt")
+    # Where scored traffic is appended, for training the next model. Unset means
+    # no collection.
+    traffic_log: Path | None = None
+
     config_file: Path = Path("config.yaml")
 
     model_config = {"env_prefix": "FINSIM_", "env_file": ".env", "extra": "ignore"}

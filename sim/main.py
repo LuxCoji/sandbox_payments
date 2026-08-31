@@ -21,6 +21,48 @@ from sim.scheduler.rng import DeterministicRNG
 logger = get_logger("finsim.cli")
 
 
+def _build_risk(config: SimConfig):
+    """Construct the fraud rails, or None when they are switched off.
+
+    This function is the *only* place the simulation touches the risk package,
+    and it is the composition root - so `sim` still has no dependency on
+    `risk`. The engine sees a `RiskScorer` protocol and nothing more, which is
+    what the import-linter contract in pyproject.toml enforces.
+    """
+    if not config.enable_risk:
+        return None
+
+    from risk.card.history import AccountHistory
+    from risk.card.scorer import SequenceCardScorer, UntrainedCardScorer
+    from risk.collect import TrafficRecorder
+    from risk.engine import FraudRiskEngine
+
+    history = AccountHistory()
+
+    # A trained model is used when one exists and the untrained rail runs when
+    # it does not. The absence is logged at warning level rather than swallowed,
+    # because a card rail that allows everything and a card rail that finds
+    # nothing look identical in the output otherwise.
+    if config.card_model_path.exists():
+        from risk.card.model import TorchSequenceModel
+
+        card = SequenceCardScorer(
+            model=TorchSequenceModel.load(config.card_model_path),
+            history=history)
+        logger.info("card model loaded", path=str(config.card_model_path))
+    else:
+        card = UntrainedCardScorer(history=history)
+        logger.warning("no card model - the card rail will allow everything",
+                       expected_at=str(config.card_model_path))
+
+    recorder = TrafficRecorder(config.traffic_log) if config.traffic_log else None
+    if recorder:
+        logger.info("collecting traffic for training", path=str(config.traffic_log))
+
+    logger.info("fraud detection enabled")
+    return FraudRiskEngine(card_scorer=card, history=history, recorder=recorder)
+
+
 def _require_db_url(config: SimConfig) -> str:
     if not config.db_url:
         raise SystemExit("No database URL: set FINSIM_DB_URL in the environment/.env or pass db_url on SimConfig")
@@ -34,7 +76,8 @@ def build_simulation(config: SimConfig) -> tuple[WorldEngineImpl, ToolGatewayImp
     # Chrono is wired into the engine so execute_command() persists every
     # emitted event via the Emit -> Append -> Apply pipeline (see engine.py).
     chrono = PostgresChronoDAG(_require_db_url(config))
-    engine = WorldEngineImpl(env=env, rng=rng, chrono=chrono)
+    engine = WorldEngineImpl(env=env, rng=rng, chrono=chrono,
+                             risk=_build_risk(config))
 
     registry = ToolRegistry()
     rate_limiter = RateLimiter()
@@ -99,6 +142,7 @@ def build_simulation_for_branch(
     engine = WorldEngineImpl(
         env=env, rng=rng, branch_id=branch_id, chrono=chrono,
         seq_num=replay_ctx.checkpoint.event_number,
+        risk=_build_risk(config),
     )
     engine.restore_full_snapshot_bytes(replay_ctx.checkpoint.aggregate_snapshot)
 
@@ -516,6 +560,12 @@ def run_seed(args: argparse.Namespace) -> None:
         final_hash=engine.get_state_hash(),
         step_count=engine._env.step_count,
     )
+
+    if engine._risk is not None:
+        logger.info("risk summary", **engine._risk.summary())
+        if getattr(engine._risk, "recorder", None):
+            engine._risk.recorder.close()
+            logger.info("traffic recorded", **engine._risk.recorder.summary())
 
 
 def fork_branch(args: argparse.Namespace) -> None:

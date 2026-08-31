@@ -452,3 +452,93 @@ body {
 .rt-bar-track { height: 16px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
 .rt-bar-fill { height: 100%; border-radius: 4px; min-width: 3px; }
 .rt-bar-value { font-family: var(--mono); font-size: 10px; color: var(--text-faint); white-space: nowrap; }
+
+/* ── Fraud panel ────────────────────────────────────────────────────────── */
+
+.fraud-banner {
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border-radius: 4px;
+  background: rgba(201, 162, 39, 0.12);
+  border: 1px solid #c9a227;
+  color: #e6c85a;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.fraud-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.fraud-tile {
+  padding: 10px 12px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.fraud-tile .n {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.fraud-tile .k {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+  margin-top: 2px;
+}
+
+.fraud-cases {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.fraud-cases th,
+.fraud-cases td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  vertical-align: top;
+}
+
+.fraud-cases th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+}
+
+.fraud-cases .mono {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.fraud-cases .reason {
+  opacity: 0.75;
+}
+
+/* Warm for the card rail, cool for wire - the same split the console uses, so
+   a reviewer moving between them reads the same colours. */
+.rail {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.rail-card {
+  background: rgba(210, 80, 79, 0.15);
+  color: #e57a79;
+}
+
+.rail-wire {
+  background: rgba(95, 168, 211, 0.15);
+  color: #5fa8d3;
+}
