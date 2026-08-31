@@ -64,6 +64,12 @@ false positives with no fraud behind them.
 | `card/scorer.py` | the seam a trained sequence model plugs into |
 | `wire/graph.py` | account graph over a sliding window, cycles and fan-out |
 | `wire/scorer.py` | structural signals to cases |
+| `card/encoding.py` | the one place FinSim's fields map onto the model schema |
+| `card/model.py` | load a checkpoint, score one account |
+| `card/training.py` | pretrain, fine-tune, save |
+| `card/treasure/` | the architecture, vendored from arXiv:2511.19693 |
+| `collect.py` | writes scored traffic to disk, exactly labelled |
+| `actions.py` | freeze, clear, reopen - append-only, named reviewers |
 
 ## What is honest about the current state
 
@@ -87,15 +93,48 @@ something the graph either shows or does not. The weights in `WireThresholds`
 are judgements, written down so they can be argued with, and nothing here claims
 a precision it has not measured on this simulator's traffic.
 
-## What comes next
+## Getting a model in
 
-1. Collect traffic. The card history is maintained even by the untrained scorer,
-   which is what makes it training data.
-2. Pretrain on unlabelled traffic - the objective needs no labels, and the
-   simulator produces unbounded amounts of it.
-3. Fine-tune on labelled fraud. Every event carries `actor_id` and the red
-   agent's identity is known, so ground truth is exact rather than inferred.
-4. Fit the thresholds so a 2% flag rate means 2% here.
-5. Measure against red-team attacks the model has not seen. Train on scripted
+Everything below is built and tested. Only the traffic is missing.
+
+```bash
+# 1. Collect. The card history is maintained even by the untrained scorer,
+#    which is what makes it training data.
+FINSIM_ENABLE_RISK=1 FINSIM_TRAFFIC_LOG=runs/traffic.jsonl     python -m sim.main run-seed
+
+# 2. Train. Pretrains without labels, then fine-tunes on the labelled fraud.
+python -m risk.card.training --traffic runs/traffic.jsonl --out models/card.pt
+```
+
+That is the whole handover. `sim.main` looks for `models/card.pt` on start-up
+and wires `SequenceCardScorer` when it finds one, `UntrainedCardScorer` when it
+does not - logging which at warning level, because a rail that allows everything
+and a rail that finds nothing look identical in the output otherwise.
+
+Labels are exact rather than inferred: every event carries `actor_id` and the
+red agent's identity is known, so a transaction is fraud if and only if the
+attacker made it.
+
+## What is still to do after that
+
+1. Fit the thresholds so a 2% flag rate means 2% on this traffic.
+2. Measure against red-team attacks the model has not seen. Train on scripted
    patterns, be judged on the LLM's own - otherwise it is marking its own
    homework.
+3. Drift detection and rollback, so a degrading model is noticed rather than
+   discovered.
+
+## Two bugs worth knowing about
+
+**`or` on a container that defines `__len__`.** `self.history = history or
+AccountHistory()` silently discarded the caller's object, because an empty
+history is falsy. The engine and its card scorer then kept separate histories,
+the scorer's sequences never reached the recorder, and the collected training
+set came out empty - with no error anywhere. Every such construction in this
+package now uses `is None`, and a test pins it.
+
+**Training and serving building features differently.** The classic silent
+model failure: no exception, no obviously wrong number, just worse predictions
+that look like a weak model. The defence here is structural - `card/encoding.py`
+is the only implementation of the mapping, imported by both paths, and a test
+asserts that what the recorder writes is what training reads.

@@ -326,3 +326,240 @@ def test_thresholds_stay_inside_their_bounds():
     bands = AmountAwareBands()
     assert bands.step_up_threshold(10**12) >= bands.floor
     assert bands.step_up_threshold(1) <= bands.ceiling
+
+
+# --- the freeze workflow ----------------------------------------------------
+
+def a_case(tx_id="tx1", amount_paise=500_000):
+    from risk.engine import Case
+
+    return Case(tx_id=tx_id, rail="wire", action="REVIEW", score=0.8,
+                reason="forwarded 96% of what it received",
+                amount_paise=amount_paise, source_account_id="mule",
+                destination_account_id="cashout", sim_time_ns=0.0)
+
+
+def test_a_freeze_requires_a_named_reviewer(tmp_path):
+    """"Who decided this" is the first question an audit asks.
+
+    Defaulting to "system" would make every freeze unattributable, which is the
+    same as having no audit trail at all.
+    """
+    from risk.actions import CaseLog, request_freeze
+
+    log = CaseLog(tmp_path / "cases.jsonl")
+    with pytest.raises(ValueError):
+        request_freeze(a_case(), reviewer="  ", reason="mule chain", log=log)
+    with pytest.raises(ValueError):
+        request_freeze(a_case(), reviewer="anita", reason="", log=log)
+
+    decision = request_freeze(a_case(), reviewer="anita",
+                              reason="mule chain", log=log)
+    assert decision.reviewer == "anita"
+
+
+def test_a_large_freeze_needs_a_second_approval(tmp_path):
+    """Large freezes are the most damaging when wrong, so one person is not enough."""
+    from risk.actions import DUAL_APPROVAL_ABOVE_PAISE, CaseLog, request_freeze
+
+    log = CaseLog(tmp_path / "cases.jsonl")
+    big = request_freeze(a_case("big", DUAL_APPROVAL_ABOVE_PAISE + 1),
+                         reviewer="anita", reason="layering", log=log)
+    assert big.pending, "a freeze above the threshold must wait for a second reviewer"
+
+    approved = request_freeze(a_case("big2", DUAL_APPROVAL_ABOVE_PAISE + 1),
+                              reviewer="anita", reason="layering", log=log,
+                              second_reviewer="ravi")
+    assert not approved.pending
+
+    small = request_freeze(a_case("small", 1_000), reviewer="anita",
+                           reason="mule", log=log)
+    assert not small.pending
+
+
+def test_the_log_is_append_only_and_reconstructible(tmp_path):
+    """A cleared case that turns out to be laundering has to be explainable."""
+    from risk.actions import CaseLog, clear_case, reopen_case, request_freeze
+
+    log = CaseLog(tmp_path / "cases.jsonl")
+    clear_case(a_case(), reviewer="anita", reason="known supplier", log=log)
+    assert log.current_state("tx1") == "cleared"
+
+    reopen_case("tx1", reviewer="ravi", reason="new pattern", log=log)
+    assert log.current_state("tx1") == "reopened"
+
+    request_freeze(a_case(), reviewer="ravi", reason="confirmed", log=log)
+    assert log.current_state("tx1") == "freeze_requested"
+
+    # Nothing was overwritten: the whole sequence is still there.
+    history = [d.action for d in log.for_case("tx1")]
+    assert history == ["cleared", "reopened", "freeze_requested"]
+
+
+def test_the_wire_rail_never_notifies_the_customer():
+    """Telling someone they are under AML review is a criminal offence.
+
+    Card fraud is the opposite: a customer who is not told why their payment
+    was declined will simply call support.
+    """
+    from risk.actions import notify_customer
+
+    wire = notify_customer("wire", "freeze_requested")
+    assert wire["notify"] is False
+    assert "tipping off" in wire["reason"]
+
+    card = notify_customer("card", "STEP_UP")
+    assert card["notify"] is True
+    assert card["message"]
+
+
+def test_decided_cases_leave_the_queue(tmp_path):
+    from risk.actions import CaseLog, clear_case, open_cases
+
+    log = CaseLog(tmp_path / "cases.jsonl")
+    cases = [a_case("tx1"), a_case("tx2"), a_case("tx3")]
+    assert len(open_cases(cases, log)) == 3
+
+    clear_case(cases[1], reviewer="anita", reason="fine", log=log)
+    remaining = [c.tx_id for c in open_cases(cases, log)]
+    assert remaining == ["tx1", "tx3"]
+
+
+# --- collecting training data -----------------------------------------------
+
+def test_traffic_is_recorded_with_exact_labels(tmp_path):
+    """Ground truth comes from who acted, not from a heuristic.
+
+    A recorder that worked out for itself who the attacker was would be a fraud
+    model, and using one model's guesses as another model's labels is how a
+    system learns to agree with itself.
+    """
+    import json
+
+    from risk.collect import TrafficRecorder
+
+    path = tmp_path / "traffic.jsonl"
+    recorder = TrafficRecorder(path, attacker_actor_ids={"owner-attacker"})
+    engine = FraudRiskEngine(recorder=recorder)
+
+    engine.assess(context("honest", "shop", 10_000, 0.0, TransactionType.PAYMENT))
+    engine.assess(context("attacker", "shop", 10_000, 60e9, TransactionType.PAYMENT))
+    recorder.close()
+
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(rows) == 2
+    assert [r["is_fraud"] for r in rows] == [0, 1]
+    assert rows[0]["observation"]["amount_paise"] == 10_000
+
+
+def test_recorded_rows_rebuild_into_trainable_sequences(tmp_path):
+    """What the recorder writes must be exactly what training reads.
+
+    Training and serving building the feature vector differently is a silent
+    failure - no exception, just worse predictions that look like a weak model.
+    This asserts the round trip.
+    """
+    import json
+
+    from risk.card.encoding import Vocabulary, encode_sequence
+    from risk.card.training import to_sequences
+    from risk.collect import TrafficRecorder
+
+    path = tmp_path / "traffic.jsonl"
+    recorder = TrafficRecorder(path, attacker_actor_ids={"owner-bad"})
+    engine = FraudRiskEngine(recorder=recorder)
+    for i in range(5):
+        engine.assess(context("acct", f"shop{i}", 10_000 * (i + 1), i * 60e9,
+                              TransactionType.PAYMENT))
+    recorder.close()
+
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    sequences, labels = to_sequences(rows)
+
+    assert len(sequences) == 5
+    assert [len(s) for s in sequences] == [1, 2, 3, 4, 5], (
+        "each row is the account's history up to and including that transaction")
+
+    vocab = Vocabulary.fit(sequences)
+    arrays = encode_sequence(sequences[-1], vocab)
+    assert arrays["length"] == 5
+    assert arrays["pad_mask"][0, :5].tolist() == [False] * 5
+    assert arrays["pad_mask"][0, 5:].all(), "the tail must stay padded"
+
+
+# --- the model path, end to end ---------------------------------------------
+
+def test_an_empty_history_passed_in_is_the_one_used():
+    """`or` on a container that defines __len__ silently discards it.
+
+    `self.history = history or AccountHistory()` looks harmless and is not: an
+    empty AccountHistory is falsy, so the caller's object was thrown away and a
+    second one built. The engine and its card scorer then kept separate
+    histories, the scorer's sequences never reached the recorder, and the
+    training set came out empty - with no error anywhere.
+    """
+    shared = AccountHistory()
+    engine = FraudRiskEngine(history=shared)
+
+    assert engine.history is shared
+    assert engine.card.history is shared
+
+    engine.assess(context("acct", "shop", 10_000, 0.0, TransactionType.PAYMENT))
+    assert len(shared) == 1, "the transaction went into a different history"
+
+
+def test_a_trained_model_saves_loads_and_scores(tmp_path):
+    """The whole path: collect, train, save, load, score one payment.
+
+    Deliberately tiny - two layers, one epoch, a hundred transactions. It proves
+    nothing about accuracy and everything about the plumbing: that what the
+    recorder writes is what training reads, that a checkpoint carries its own
+    vocabulary and shape, and that a loaded model plugs into the scorer without
+    anything else changing.
+    """
+    import json
+
+    from risk.card.model import TorchSequenceModel
+    from risk.card.scorer import SequenceCardScorer
+    from risk.card.training import train
+    from risk.collect import TrafficRecorder
+
+    traffic = tmp_path / "traffic.jsonl"
+    recorder = TrafficRecorder(traffic, attacker_actor_ids={"owner-bad"})
+    collecting = FraudRiskEngine(recorder=recorder)
+
+    for i in range(100):
+        account = "bad" if i % 10 == 0 else f"good{i % 7}"
+        collecting.assess(context(account, f"shop{i % 5}", 10_000 + i * 100,
+                                  i * 60e9, TransactionType.PAYMENT))
+    recorder.close()
+
+    rows = [json.loads(line) for line in traffic.read_text().splitlines()]
+    assert sum(r["is_fraud"] for r in rows) > 0, "the fixture produced no fraud"
+
+    out = tmp_path / "card.pt"
+    result = train(traffic, out, pretrain_epochs=1, finetune_epochs=1,
+                   model_config={"d_model": 32, "n_layers": 2, "n_heads": 2,
+                                 "input_layers": 1, "max_seq_len": 32})
+    assert out.exists()
+    assert 0.0 <= result["recall_at_2pct"] <= 1.0
+
+    # The part that matters: loading it back and scoring a live payment.
+    model = TorchSequenceModel.load(out)
+    scorer = SequenceCardScorer(model=model)
+    engine = FraudRiskEngine(card_scorer=scorer, history=scorer.history)
+
+    decision = engine.assess(context("someone", "shop", 25_000, 0.0,
+                                     TransactionType.PAYMENT))
+    assert decision.rail == "card"
+    assert 0.0 <= decision.score <= 1.0
+    assert decision.action in (RiskAction.ALLOW, RiskAction.STEP_UP,
+                               RiskAction.BLOCK)
+
+
+def test_loading_a_missing_model_fails_loudly(tmp_path):
+    """Silently falling back to "allow everything" is how a rail dies unnoticed."""
+    from risk.card.model import TorchSequenceModel
+
+    with pytest.raises(FileNotFoundError, match="no card model"):
+        TorchSequenceModel.load(tmp_path / "absent.pt")

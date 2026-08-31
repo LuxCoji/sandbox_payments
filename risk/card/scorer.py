@@ -66,7 +66,7 @@ class UntrainedCardScorer:
     """
 
     def __init__(self, history: AccountHistory | None = None) -> None:
-        self.history = history or AccountHistory()
+        self.history = AccountHistory() if history is None else history
         log.warning(
             "card rail has no trained model: every payment will be allowed. "
             "Train one on simulator traffic and wire SequenceCardScorer.")
@@ -96,7 +96,7 @@ class SequenceCardScorer:
                 "UntrainedCardScorer if none exists yet, so that the absence "
                 "of a model is visible rather than silent.")
         self.model = model
-        self.history = history or AccountHistory()
+        self.history = AccountHistory() if history is None else history
         self.bands = bands or AmountAwareBands()
 
     def assess(self, context: RiskContext) -> RiskDecision:

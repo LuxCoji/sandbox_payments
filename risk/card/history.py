@@ -62,6 +62,12 @@ class Observation:
     sim_time_ns: float
     amount_paise: int
     tx_type: str
+    # The account's own attributes, carried on every row rather than looked up
+    # separately. They are constant across a sequence, so the model reads them
+    # once at position 0 - but keeping them here means a sequence is
+    # self-contained and encoding needs no second source.
+    account_type: str
+    kyc_level: int
     destination_account_id: str
     gateway_id: str
     device_type: str
@@ -142,6 +148,9 @@ class AccountHistory:
             sim_time_ns=context.sim_time_ns,
             amount_paise=context.amount_paise,
             tx_type=context.tx_type.value,
+            account_type=(context.source_account_type.value
+                          if context.source_account_type else "unknown"),
+            kyc_level=context.source_kyc_level,
             destination_account_id=context.destination_account_id,
             gateway_id=context.gateway_id or "none",
             device_type=context.device_type.value if context.device_type else "none",

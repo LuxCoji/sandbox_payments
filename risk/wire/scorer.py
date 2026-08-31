@@ -77,7 +77,9 @@ class WireScorer:
 
     def __init__(self, graph: TransferGraph | None = None,
                  thresholds: WireThresholds | None = None) -> None:
-        self.graph = graph or TransferGraph()
+        # Same trap as AccountHistory: TransferGraph defines __len__, so an
+        # empty graph is falsy and `or` would quietly replace it.
+        self.graph = TransferGraph() if graph is None else graph
         self.thresholds = thresholds or WireThresholds()
 
     def observe(self, context: RiskContext) -> None:

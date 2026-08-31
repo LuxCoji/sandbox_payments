@@ -32,10 +32,35 @@ def _build_risk(config: SimConfig):
     if not config.enable_risk:
         return None
 
-    from risk import FraudRiskEngine
+    from risk.card.history import AccountHistory
+    from risk.card.scorer import SequenceCardScorer, UntrainedCardScorer
+    from risk.collect import TrafficRecorder
+    from risk.engine import FraudRiskEngine
+
+    history = AccountHistory()
+
+    # A trained model is used when one exists and the untrained rail runs when
+    # it does not. The absence is logged at warning level rather than swallowed,
+    # because a card rail that allows everything and a card rail that finds
+    # nothing look identical in the output otherwise.
+    if config.card_model_path.exists():
+        from risk.card.model import TorchSequenceModel
+
+        card = SequenceCardScorer(
+            model=TorchSequenceModel.load(config.card_model_path),
+            history=history)
+        logger.info("card model loaded", path=str(config.card_model_path))
+    else:
+        card = UntrainedCardScorer(history=history)
+        logger.warning("no card model - the card rail will allow everything",
+                       expected_at=str(config.card_model_path))
+
+    recorder = TrafficRecorder(config.traffic_log) if config.traffic_log else None
+    if recorder:
+        logger.info("collecting traffic for training", path=str(config.traffic_log))
 
     logger.info("fraud detection enabled")
-    return FraudRiskEngine()
+    return FraudRiskEngine(card_scorer=card, history=history, recorder=recorder)
 
 
 def _require_db_url(config: SimConfig) -> str:

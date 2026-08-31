@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 
 from risk.card.history import AccountHistory
 from risk.card.scorer import UntrainedCardScorer
+from risk.collect import TrafficRecorder
 from risk.wire.graph import TransferGraph
 from risk.wire.scorer import WireScorer
 from sim.core.interfaces import (
@@ -90,12 +91,20 @@ class FraudRiskEngine:
 
     def __init__(self, card_scorer=None, wire_scorer: WireScorer | None = None,
                  history: AccountHistory | None = None,
-                 graph: TransferGraph | None = None) -> None:
-        self.history = history or AccountHistory()
+                 graph: TransferGraph | None = None,
+                 recorder: TrafficRecorder | None = None) -> None:
+        # `is None`, not `or`: AccountHistory defines __len__, so an empty
+        # one is falsy and `history or AccountHistory()` would discard the
+        # caller's object and silently build a second, separate history.
+        self.history = AccountHistory() if history is None else history
         self.card = card_scorer or UntrainedCardScorer(history=self.history)
-        self.wire = wire_scorer or WireScorer(graph=graph or TransferGraph())
+        self.wire = wire_scorer or WireScorer(
+            graph=TransferGraph() if graph is None else graph)
         self.counters = Counters()
         self.cases: list[Case] = []
+        # With no model trained yet, this is the point of running at all: the
+        # history is built either way, and the recorder writes it down.
+        self.recorder = recorder
 
     def assess(self, context: RiskContext) -> RiskDecision:
         """Score one transaction. Never raises.
@@ -109,6 +118,7 @@ class FraudRiskEngine:
 
         if context.tx_type in CARD_TYPES:
             decision = self.card.assess(context)
+            self._record_traffic(context)
         elif context.tx_type in WIRE_TYPES:
             decision = self.wire.assess(context)
         else:
@@ -118,6 +128,20 @@ class FraudRiskEngine:
         self._record(context, decision)
         self._maybe_evict(context)
         return decision
+
+    def _record_traffic(self, context: RiskContext) -> None:
+        """Append this payment to the training set, if one is being collected.
+
+        Read back out of the history rather than rebuilt, so the row written to
+        disk is byte-identical to the one the scorer just used. Building it
+        twice would be two implementations of the same mapping, which is exactly
+        the drift `risk.card.encoding` exists to prevent.
+        """
+        if self.recorder is None:
+            return
+        sequence = self.history.sequence(context.source_account_id)
+        if sequence:
+            self.recorder.record(context, sequence[-1])
 
     def _record(self, context: RiskContext, decision: RiskDecision) -> None:
         counters = self.counters
