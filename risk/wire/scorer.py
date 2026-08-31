@@ -26,7 +26,7 @@ precision it has not measured.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from risk.wire.graph import AccountStructure, TransferGraph
 from sim.core.interfaces import RiskAction, RiskContext, RiskDecision
@@ -52,9 +52,16 @@ class WireThresholds:
     traffic.
     """
 
-    # A mule forwards nearly everything it receives. Ordinary accounts keep a
-    # balance, so the ratio sits well below one.
-    passthrough_ratio: float = 0.90
+    # A mule forwards nearly everything it receives - so the ratio sits just
+    # *below* one, and a band is needed rather than a floor.
+    #
+    # A floor alone was wrong and measurably so: `passthrough` is unbounded, and
+    # an ordinary account that spends money arriving from outside the transfer
+    # graph - a salary, a deposit - reaches 2.46. Reading "at least 0.90"
+    # flagged 80% of legitimate traffic. Sending far more than you received is
+    # not the pass-through pattern; it is the opposite of it.
+    passthrough_ratio: float = 0.85
+    passthrough_ceiling: float = 1.15
     passthrough_min_received_paise: int = 100_000       # 1,000 rupees
 
     # Fan-out inside six hours to many counterparties. A payroll run does this
@@ -66,10 +73,53 @@ class WireThresholds:
     cycle_hours: float = 24.0
     cycle_max_length: int = 4
 
-    # The score at which a case is raised. Set so that no single signal is
-    # enough on its own - laundering is a combination of structure and speed,
-    # and any one of these alone has an innocent explanation.
+    # The score at which a case is raised.
+    #
+    # This default is a guess and should be replaced by `calibrate` below. A
+    # hand-picked bar is the wrong tool: it was originally set to 0.60 on the
+    # reasoning that no single signal should suffice, and a textbook mule chain
+    # - money in from six accounts, 93% of it straight back out to six others
+    # within the hour - scored 0.35 and passed unflagged.
+    #
+    # The lesson is not "lower it until that case passes", which is fitting the
+    # bar to one example. It is that a threshold has to be set against the
+    # distribution of real traffic, so that flagging a fixed share of it means
+    # something operationally.
     review_at: float = 0.60
+
+
+def calibrate(transfers, target_flag_rate: float = 0.02,
+              thresholds: WireThresholds | None = None) -> WireThresholds:
+    """Choose `review_at` so a known share of normal traffic is flagged.
+
+    Review capacity is the real constraint - a team can look at so many cases a
+    day and no more - so the useful question is "what bar spends exactly that
+    budget", not "what number feels suspicious". This replays traffic, collects
+    the score every transfer would have received, and returns thresholds whose
+    bar sits at the requested percentile.
+
+    Pass traffic **without** known fraud in it. Calibrating on a mixture sets
+    the bar above some of the fraud, which is the opposite of what it is for.
+    """
+    thresholds = thresholds or WireThresholds()
+    scorer = WireScorer(thresholds=thresholds)
+    scores = sorted((scorer.assess(t).score for t in transfers), reverse=True)
+
+    if not scores:
+        raise ValueError("no transfers to calibrate on")
+
+    index = min(int(len(scores) * target_flag_rate), len(scores) - 1)
+    bar = scores[index]
+
+    # Scores are discrete - they are sums of a handful of fixed weights - so the
+    # percentile often lands on a value shared by many transfers, and a bar set
+    # exactly there flags all of them. Nudging above it keeps the flag rate at
+    # or under the budget rather than overshooting it.
+    above = [s for s in scores if s > bar]
+    if above and len(above) / len(scores) <= target_flag_rate:
+        bar = min(above)
+
+    return replace(thresholds, review_at=bar)
 
 
 class WireScorer:
@@ -117,7 +167,8 @@ class WireScorer:
         signals: list[Signal] = []
 
         if (structure.received_total >= limits.passthrough_min_received_paise
-                and structure.passthrough >= limits.passthrough_ratio):
+                and limits.passthrough_ratio <= structure.passthrough
+                <= limits.passthrough_ceiling):
             signals.append(Signal(
                 "passthrough", 0.35,
                 f"{side} forwarded {structure.passthrough:.0%} of what it received"))

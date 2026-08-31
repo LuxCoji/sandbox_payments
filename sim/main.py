@@ -561,6 +561,12 @@ def run_seed(args: argparse.Namespace) -> None:
         step_count=engine._env.step_count,
     )
 
+    if engine._risk is not None:
+        logger.info("risk summary", **engine._risk.summary())
+        if getattr(engine._risk, "recorder", None):
+            engine._risk.recorder.close()
+            logger.info("traffic recorded", **engine._risk.recorder.summary())
+
 
 def fork_branch(args: argparse.Namespace) -> None:
     """Create a new alternate-timeline branch from a checkpoint."""

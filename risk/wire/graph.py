@@ -87,6 +87,14 @@ class AccountStructure:
         because a ratio with no denominator is not a high one - it is unknown,
         and treating unknown as suspicious would flag every account on its
         first outbound transfer.
+
+        **Unbounded on purpose, and the caller must treat it as such.** A value
+        above 1.0 means the account sent more than arrived by transfer, so the
+        rest came from somewhere outside this graph - a salary, a deposit, a
+        card refund. That is an ordinary person spending their own money, not a
+        mule, and it is the opposite of the pattern. Measured on legitimate
+        simulator traffic this ratio reached 2.46, and a rule reading "at least
+        0.90" flagged 80% of honest accounts.
         """
         if self.received_total <= 0:
             return 0.0

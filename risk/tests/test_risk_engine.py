@@ -563,3 +563,159 @@ def test_loading_a_missing_model_fails_loudly(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="no card model"):
         TorchSequenceModel.load(tmp_path / "absent.pt")
+
+
+# --- the wire rail's thresholds ---------------------------------------------
+
+def test_passthrough_is_a_band_not_a_floor():
+    """Sending far more than you received is not the pass-through pattern.
+
+    `passthrough` is sent/received and unbounded. An ordinary account spending
+    money that arrived from outside the transfer graph - a salary, a deposit, a
+    card refund - reaches ratios well above 1.0. A rule reading "at least 0.90"
+    therefore fired on ordinary behaviour: measured on legitimate simulator
+    traffic it flagged 80% of honest accounts, with reasons like "forwarded 246%
+    of what it received".
+
+    A mule sits just *below* one: money arrives and nearly all of it leaves.
+    """
+    from risk.wire.scorer import WireThresholds
+
+    limits = WireThresholds()
+    scorer = WireScorer(thresholds=limits)
+
+    def passthrough_signal(sent, received):
+        graph = TransferGraph()
+        graph.add("payer", "account", received, 0.0)
+        graph.add("account", "payee", sent, 60e9)
+        structure = graph.structure("account", 60e9)
+        names = {s.name for s in scorer._signals(structure, "account")}
+        return "passthrough" in names
+
+    assert passthrough_signal(sent=950_000, received=1_000_000), (
+        "a mule forwarding 95% of what it received must be flagged")
+    assert not passthrough_signal(sent=2_460_000, received=1_000_000), (
+        "spending money from outside the graph is not pass-through")
+    assert not passthrough_signal(sent=100_000, received=1_000_000), (
+        "keeping 90% of what arrived is ordinary saving")
+
+
+def test_the_review_bar_can_be_fitted_to_a_flag_rate():
+    """A hand-picked bar is a guess; a fitted one spends a known budget.
+
+    The original 0.60 was reasoned about rather than measured, and a textbook
+    mule chain - six accounts in, 93% straight back out to six others within the
+    hour - scored 0.35 and passed unflagged. The fix is not a lower guess, it is
+    fitting the bar to the distribution of real traffic.
+    """
+    from risk.wire.scorer import calibrate
+
+    # Ordinary traffic: everyone pays a couple of people, keeps most of it.
+    transfers = []
+    at = 0.0
+    for i in range(400):
+        at += 300e9
+        transfers.append(context(f"person{i % 90}", f"person{(i * 7) % 90}",
+                                 50_000, at))
+
+    fitted = calibrate(transfers, target_flag_rate=0.02)
+    scorer = WireScorer(thresholds=fitted)
+    flagged = sum(1 for t in transfers
+                  if WireScorer(thresholds=fitted).assess(t).action is RiskAction.REVIEW)
+
+    assert flagged <= len(transfers) * 0.05, (
+        f"fitted bar flagged {flagged} of {len(transfers)} - the budget was 2%")
+
+
+def test_calibration_refuses_an_empty_sample():
+    """Fitting a threshold on nothing would return the default and look fitted."""
+    from risk.wire.scorer import calibrate
+
+    with pytest.raises(ValueError):
+        calibrate([])
+
+
+# --- drift monitoring -------------------------------------------------------
+
+def test_drift_is_measured_against_stored_bins():
+    """Recomputed bins move with the data and hide the drift they exist to find.
+
+    This is the failure the wire rail's own history warns about: a threshold or
+    a bin edge that is re-derived from the live window adapts to whatever
+    arrives, so a distribution that has shifted lands in shifted bins and the
+    monitor reports everything is fine.
+    """
+    import numpy as np
+
+    from risk.monitoring import Reference, check
+
+    rng = np.random.default_rng(0)
+    reference = Reference.fit(rng.beta(2, 20, 5000), threshold=0.30)
+
+    assert check(reference, rng.beta(2, 20, 3000)).healthy, (
+        "the same distribution must not raise drift")
+    assert not check(reference, rng.beta(5, 10, 3000)).healthy, (
+        "a shifted distribution must raise drift")
+
+
+def test_an_empty_bin_is_floored_not_skipped():
+    """A bin that held 8% and now holds nothing is the strongest drift signal."""
+    import numpy as np
+
+    from risk.monitoring import Reference, population_stability_index
+
+    rng = np.random.default_rng(1)
+    reference = Reference.fit(rng.uniform(0, 1, 4000), threshold=0.5)
+    # Everything collapses into the bottom bin: most reference bins go empty.
+    psi = population_stability_index(reference, np.full(2000, 0.01))
+
+    assert np.isfinite(psi), "empty bins produced a non-finite PSI"
+    assert psi > 1.0, f"a total collapse should be obvious drift, got {psi:.3f}"
+
+
+def test_a_reference_needs_enough_scores_to_be_a_distribution():
+    import numpy as np
+
+    from risk.monitoring import Reference
+
+    with pytest.raises(ValueError):
+        Reference.fit(np.array([0.1, 0.2, 0.3]), threshold=0.5)
+
+
+# --- the console ------------------------------------------------------------
+
+def test_the_console_says_when_the_card_rail_is_untrained():
+    """An empty case list looks identical whether the rail is clean or off."""
+    from risk.console import render
+
+    page = render({"scored": 100, "flagged": 0, "flag_rate": 0.0, "blocked": 0,
+                   "review": 0, "accounts_tracked": 10},
+                  cases=[], card_model_loaded=False)
+    assert "no trained model" in page.lower()
+
+    page = render({"scored": 100, "flagged": 0, "flag_rate": 0.0, "blocked": 0,
+                   "review": 0, "accounts_tracked": 10},
+                  cases=[], card_model_loaded=True)
+    assert "no trained model" not in page.lower()
+
+
+def test_the_console_escapes_everything_it_renders():
+    """Case reasons carry account ids and model output, none of it trusted."""
+    from risk.console import render
+    from risk.engine import Case
+
+    nasty = Case(tx_id="<script>alert(1)</script>", rail="wire", action="REVIEW",
+                 score=0.9, reason="<img src=x onerror=alert(1)>",
+                 amount_paise=100, source_account_id="a",
+                 destination_account_id="b", sim_time_ns=0.0)
+    page = render({"scored": 1}, [nasty], card_model_loaded=True)
+
+    # What matters is that no tag delimiter from the data survives as markup.
+    # The words "onerror" and "script" *do* survive as escaped text, which is
+    # harmless - asserting their absence would be testing the wrong thing and
+    # would fail on a correct escaper.
+    assert "&lt;script&gt;" in page, "the tag was not escaped"
+    assert "&lt;img src=x onerror=alert(1)&gt;" in page
+    body = page[page.index("<table>"):]
+    assert "<script" not in body and "<img" not in body, (
+        "a tag from the case data reached the document as markup")

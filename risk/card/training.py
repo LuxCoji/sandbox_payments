@@ -137,7 +137,8 @@ def stack(sequences: list[list[Observation]], labels: np.ndarray,
 def train(traffic_path: Path, out_path: Path, device: str = "cpu",
           pretrain_epochs: int = PRETRAIN_EPOCHS,
           finetune_epochs: int = FINETUNE_EPOCHS,
-          model_config: dict | None = None) -> dict:
+          model_config: dict | None = None,
+          warm_start: Path | None = None) -> dict:
     """Pretrain, fine-tune, save. Returns what happened, for the caller to print.
 
     The epoch counts and model size default to the recipe settled by
@@ -182,24 +183,42 @@ def train(traffic_path: Path, out_path: Path, device: str = "cpu",
     vocab = Vocabulary.fit(train_sequences)
     train_arrays = stack(train_sequences, train_labels, vocab)
 
-    model = build_model(build_schema(vocab), ModelConfig(**DEFAULT_MODEL_CONFIG))
+    config = dict(model_config or DEFAULT_MODEL_CONFIG)
+    model = build_model(build_schema(vocab), ModelConfig(**config))
 
-    print(f"\npretraining {PRETRAIN_EPOCHS} epochs (no labels read)")
-    arm = Arm(epochs=FINETUNE_EPOCHS, pretrain_epochs=PRETRAIN_EPOCHS,
-              aux_weight=AUX_WEIGHT, batch_size=BATCH_SIZE)
+    warm = None
+    if warm_start is not None:
+        from risk.card.warmstart import load_body
+
+        warm = load_body(model, warm_start, device)
+        print(f"warm start from {warm['trained_on']}: {warm['copied']} decoder "
+              f"tensors copied, {warm['skipped_schema_dependent']} "
+              f"schema-dependent ones rebuilt")
+        if warm["copied"] == 0:
+            raise SystemExit(
+                "the warm start copied nothing - the checkpoint's model config "
+                "probably differs from this one. Continuing would train from "
+                "random while reporting a warm start, which is worse than not "
+                "attempting one.")
+
+    print(f"\npretraining {pretrain_epochs} epochs (no labels read)")
+    arm = Arm(epochs=finetune_epochs, pretrain_epochs=pretrain_epochs,
+              aux_weight=AUX_WEIGHT, batch_size=BATCH_SIZE,
+              d_model=config["d_model"], n_layers=config["n_layers"],
+              n_heads=config["n_heads"])
     pretrain(model, train_arrays, arm, device)
 
-    print(f"\nfine-tuning {FINETUNE_EPOCHS} epochs")
+    print(f"\nfine-tuning {finetune_epochs} epochs")
     finetune(model, train_arrays, arm, device)
 
-    trained = TorchSequenceModel(model, vocab, device=device)
+    trained = TorchSequenceModel(model, vocab, device=device, config=config)
     saved = trained.save(out_path)
     print(f"\nsaved {saved}")
 
     holdout = _evaluate(trained, holdout_sequences, holdout_labels)
     print(f"holdout: {holdout['fraud']:,} fraud in {holdout['rows']:,} rows, "
           f"recall@2% {holdout['recall_at_2pct']:.2%}")
-    return {"path": str(saved), **holdout}
+    return {"path": str(saved), "warm_start": warm, **holdout}
 
 
 def _evaluate(model, sequences: list[list[Observation]],
@@ -233,9 +252,15 @@ def main() -> None:
                         help="JSON Lines traffic collected from the simulator")
     parser.add_argument("--out", type=Path, default=Path("models/card.pt"))
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--warm-start", type=Path, default=None,
+                        dest="warm_start",
+                        help="Checkpoint to copy the decoder body from. The "
+                             "input and output modules are always rebuilt - "
+                             "they are sized by this environment's schema.")
     args = parser.parse_args()
 
-    result = train(args.traffic, args.out, args.device)
+    result = train(args.traffic, args.out, args.device,
+                   warm_start=args.warm_start)
     print(json.dumps(result, indent=2))
 
 

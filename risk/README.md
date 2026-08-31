@@ -68,8 +68,11 @@ false positives with no fraud behind them.
 | `card/model.py` | load a checkpoint, score one account |
 | `card/training.py` | pretrain, fine-tune, save |
 | `card/treasure/` | the architecture, vendored from arXiv:2511.19693 |
+| `card/warmstart.py` | copies the decoder body from a model trained elsewhere |
 | `collect.py` | writes scored traffic to disk, exactly labelled |
 | `actions.py` | freeze, clear, reopen - append-only, named reviewers |
+| `monitoring.py` | PSI and flag-rate drift against a stored reference |
+| `console.py` | a page a reviewer opens to see what was flagged |
 
 ## What is honest about the current state
 
@@ -117,14 +120,44 @@ Labels are exact rather than inferred: every event carries `actor_id` and the
 red agent's identity is known, so a transaction is fraud if and only if the
 attacker made it.
 
-## What is still to do after that
+## What the wire rail measures on real simulator traffic
 
-1. Fit the thresholds so a 2% flag rate means 2% on this traffic.
+Fitted on a clean run - legitimate transfers only, no attacks - and then
+measured on a run with the scripted laundering patterns injected, using the bar
+from the clean run and never re-fitted.
+
+| | |
+| --- | --- |
+| false alarms on legitimate traffic | 0.53% |
+| precision on the cases it raised | 28.6% |
+
+Two bugs were found getting there, and both are worth knowing:
+
+**The pass-through ratio was unbounded.** `sent / received` reads above 1.0 for
+any account spending money that arrived from outside the transfer graph - a
+salary, a deposit. A rule reading "at least 0.90" flagged **80% of legitimate
+accounts**, with reasons like "forwarded 246% of what it received". A mule sits
+just *below* one, so the signal needed a band, not a floor.
+
+**The bar was a guess.** 0.60 was reasoned about rather than measured, and a
+textbook mule chain - six accounts in, 93% straight back out to six others
+within the hour - scored 0.35 and passed unflagged. `calibrate()` now fits it to
+a target flag rate on clean traffic.
+
+One thing the simulator does that is worth knowing: **its population never
+completes a transfer.** `_propose_user_actions` gives transfers 30% of its
+action weight but sets the target to a freshly generated UUID rather than an
+existing account, so `_execute_transfer` finds no destination and returns before
+emitting anything. The wire rail therefore sees no organic transfer traffic. That
+is the simulator's own behaviour and this integration does not reach in and
+change it.
+
+## What is still to do
+
+1. Train the card model - see above; the path is built and tested.
 2. Measure against red-team attacks the model has not seen. Train on scripted
    patterns, be judged on the LLM's own - otherwise it is marking its own
    homework.
-3. Drift detection and rollback, so a degrading model is noticed rather than
-   discovered.
 
 ## Two bugs worth knowing about
 
