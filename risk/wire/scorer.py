@@ -26,6 +26,7 @@ precision it has not measured.
 """
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from dataclasses import dataclass, replace
 
@@ -36,6 +37,8 @@ from sim.core.interfaces import (
     RiskContext,
     RiskDecision,
 )
+
+log = logging.getLogger(__name__)
 
 RAIL = "wire"
 
@@ -133,6 +136,23 @@ class WireThresholds:
     # through accounts a single person controls.
     self_dealing: float = 0.25
 
+    # Where the IBM-trained model's score starts contributing, and how much.
+    #
+    # An INFERENCE weight on purpose. The model runs here with four of its
+    # features constant - together 31.6% of its training gain, including its
+    # strongest - so it is evidence rather than a verdict, and a case still
+    # needs something structural alongside it. That conjunction is the whole
+    # reason this can help where blending the two rankings measurably could not.
+    #
+    # The threshold is **fitted**, and the default is deliberately unreachable.
+    # Those same constants compress the model's output: on simulator traffic it
+    # never exceeds 0.27, so any hand-picked bar near 0.5 means the signal
+    # silently never fires - which is what a first attempt did, producing two
+    # arms with byte-identical results and the appearance of "no effect". A
+    # probability from a model whose best splits are inert is not comparable to
+    # one from the model as trained, so the bar has to come from this traffic.
+    model_score: float = 1.0
+
     # The score at which a case is raised.
     #
     # This default is a guess and should be replaced by `calibrate` below. A
@@ -149,7 +169,8 @@ class WireThresholds:
 
 
 def calibrate(transfers, target_flag_rate: float = 0.02,
-              thresholds: WireThresholds | None = None) -> WireThresholds:
+              thresholds: WireThresholds | None = None,
+              model=None) -> WireThresholds:
     """Fit the thresholds to observed traffic instead of guessing them.
 
     Review capacity is the real constraint - a team can look at so many cases a
@@ -182,8 +203,11 @@ def calibrate(transfers, target_flag_rate: float = 0.02,
     # percentile inside a six-hour window.
     value_percentile = 1.0 - target_flag_rate / 2
     thresholds = _fit_value_thresholds(transfers, thresholds, value_percentile)
+    if model is not None:
+        thresholds = _fit_model_threshold(transfers, thresholds, model,
+                                          value_percentile)
 
-    scorer = WireScorer(thresholds=thresholds)
+    scorer = WireScorer(thresholds=thresholds, model=model)
     scores = sorted((scorer.assess(t).score for t in transfers), reverse=True)
 
     if not scores:
@@ -244,15 +268,50 @@ def _fit_value_thresholds(transfers, thresholds: WireThresholds,
     )
 
 
+def _fit_model_threshold(transfers, thresholds: WireThresholds, model,
+                         percentile: float) -> WireThresholds:
+    """Set the model's bar at a percentile of what it says about clean traffic.
+
+    A probability means something only relative to the distribution the model
+    produces, and this one's distribution is compressed by its constant
+    features. Fitted here, "unusual for this model on this traffic" is what the
+    signal actually tests.
+    """
+    observer = WireScorer(thresholds=thresholds)
+    scores = []
+    for context in transfers:
+        observer.observe(context)
+        source = observer.graph.structure(context.source_account_id,
+                                          context.sim_time_ns)
+        destination = observer.graph.structure(context.destination_account_id,
+                                               context.sim_time_ns)
+        try:
+            scores.append(model.score(context, source, destination))
+        except Exception:
+            log.exception("wire model raised while calibrating")
+            return thresholds
+
+    if not scores:
+        return thresholds
+
+    ordered = sorted(scores)
+    index = min(int(len(ordered) * percentile), len(ordered) - 1)
+    return replace(thresholds, model_score=ordered[index])
+
+
 class WireScorer:
     """Watches every transfer and raises cases on structure. Blocks nothing."""
 
     def __init__(self, graph: TransferGraph | None = None,
-                 thresholds: WireThresholds | None = None) -> None:
+                 thresholds: WireThresholds | None = None,
+                 model=None) -> None:
         # Same trap as AccountHistory: TransferGraph defines __len__, so an
         # empty graph is falsy and `or` would quietly replace it.
         self.graph = TransferGraph() if graph is None else graph
         self.thresholds = thresholds or WireThresholds()
+        # Optional. The rules score better alone than any blend measured, so a
+        # missing model is a configuration rather than a failure.
+        self.model = model
         # Value moved per owner inside the rolling window, and per account.
         # The engine caps a single account's daily volume and nothing sums what
         # one actor moved across every account it controls - so an attacker
@@ -302,7 +361,8 @@ class WireScorer:
 
         signals = (self._signals(source, "sender")
                    + self._signals(destination, "recipient")
-                   + self._context_signals(context))
+                   + self._context_signals(context)
+                   + self._model_signal(context, source, destination))
         score = min(1.0, sum(s.weight for s in signals))
 
         if score >= self.thresholds.review_at:
@@ -311,6 +371,26 @@ class WireScorer:
                 reason="; ".join(s.detail for s in signals),
             )
         return RiskDecision.allow(rail=RAIL, score=score)
+
+    def _model_signal(self, context: RiskContext, source, destination) -> list[Signal]:
+        """What the trained model makes of this transfer, if one is wired.
+
+        A failure here is swallowed. The rules are the rail; the model is one
+        more opinion, and a rail that stopped working because an optional
+        booster raised would be worse than one running without it.
+        """
+        if self.model is None:
+            return []
+        try:
+            score = self.model.score(context, source, destination)
+        except Exception:
+            log.exception("wire model raised; scoring on the rules alone")
+            return []
+
+        if score < self.thresholds.model_score:
+            return []
+        return [Signal("model", INFERENCE,
+                       f"the trained model scores this {score:.2f}")]
 
     def _context_signals(self, context: RiskContext) -> list[Signal]:
         """Facts about the transaction itself, rather than the graph shape.

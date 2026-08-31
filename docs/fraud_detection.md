@@ -111,7 +111,7 @@ feature, `same_bank` second, `currency_switch` fourth, and the four carry
 **31.6% of its total gain**. A tree splitting on a constant sends every row down
 one branch, so importing it runs a model with its three best signals flatlined.
 
-### And ensembling the two makes it worse
+### Blending the scores makes it worse - but the model helps as a *signal*
 
 Worth asking, because the two are genuinely different - their rank correlation
 is 0.344, and of the 60 transfers in the model's top 5% that the rules did not
@@ -130,11 +130,32 @@ Measured anyway:
 Every blend loses. Averaging makes one ranking, and a noisy member degrades it
 everywhere - the disagreement set is small and the noise is not.
 
-Splitting the review *budget* instead of the score - all cases to the rules
-except a reserved slice for the model - could not be measured here: the fixture
-runs 42% attacker-touching traffic, so any budget saturates at 100% precision
-and the splits are indistinguishable. Worth revisiting once the generator
-produces a realistic fraud rate.
+Splitting the review *budget* instead of the score could not be measured here:
+the fixture runs 42% attacker-touching traffic, so any budget saturates at 100%
+precision and the splits are indistinguishable.
+
+**What does work is adding the model where every other piece of evidence
+enters - as a `Signal` with a weight.** That makes the combination conjunctive
+rather than averaged: a high model score raises a case when something structural
+also fired, and alone it contributes without deciding.
+
+| on the same 1,302 transfers | AUC | cases | caught | precision | recall |
+| --- | --- | --- | --- | --- | --- |
+| rules alone | 0.967 | 305 | 299 | 98.0% | 54.3% |
+| **rules + model signal** | **0.972** | 353 | **345** | 97.7% | **62.6%** |
+
+46 more attackers caught, precision holding at 97.7%, false alarms unchanged.
+That is the same model that lost as a blend - what changed is how its opinion is
+combined, not how good it is.
+
+**Its threshold has to be fitted, and the default is deliberately unreachable.**
+The four constant features compress its output: on simulator traffic it never
+exceeds 0.27, so a hand-picked bar near 0.5 means the signal silently never
+fires. A first attempt did exactly that and produced two arms with
+byte-identical results - which reads as "the model adds nothing" and is really
+"the model was never consulted". A probability from a model whose best splits
+are inert is not comparable to one from the model as trained, so the bar comes
+from the same clean traffic every other threshold is fitted on.
 
 ## Following the chain
 

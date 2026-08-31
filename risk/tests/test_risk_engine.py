@@ -1340,3 +1340,80 @@ def test_a_step_up_on_the_wire_rail_is_refused():
 
     assert notify_customer("wire", "STEP_UP")["notify"] is False
     assert notify_customer("card", "STEP_UP")["notify"] is True
+
+
+# --- the wire model, as a signal --------------------------------------------
+
+def test_the_model_threshold_must_be_fitted_not_picked():
+    """The model's output range is compressed by its constant features.
+
+    Four of its 49 features are constants here, together 31.6% of its training
+    gain. On simulator traffic it never exceeds about 0.27, so a hand-picked bar
+    near 0.5 means the signal silently never fires - which is exactly what a
+    first attempt did, producing two arms with byte-identical results and the
+    appearance of "the model adds nothing".
+    """
+    from risk.wire.scorer import WireThresholds
+
+    assert WireThresholds().model_score >= 1.0, (
+        "the default must be unreachable, so an unfitted model contributes "
+        "nothing rather than contributing arbitrarily")
+
+
+def test_a_fitted_model_bar_lets_the_signal_fire():
+    from risk.wire.scorer import WireScorer, calibrate
+
+    class Model:
+        """Scores rise with the amount, so a percentile is well defined."""
+
+        def score(self, context, source, destination):
+            return min(0.25, context.amount_paise / 4_000_000)
+
+    transfers = [context(f"a{i}", f"b{i}", 50_000 + i * 5_000, i * 600e9)
+                 for i in range(200)]
+    fitted = calibrate(transfers, target_flag_rate=0.02, model=Model())
+
+    assert fitted.model_score < 1.0, "the bar was never fitted"
+    assert 0.0 < fitted.model_score <= 0.25, (
+        f"the bar landed outside the model's own range: {fitted.model_score}")
+
+    scorer = WireScorer(thresholds=fitted, model=Model())
+    fired = [s.name for s in scorer._model_signal(
+        context("x", "y", 5_000_000, 0.0), None, None)]
+    assert "model" in fired, "a high-scoring transfer did not raise the signal"
+
+
+def test_a_raising_model_does_not_take_the_rail_down():
+    """The rules are the rail; the model is one more opinion."""
+    from risk.wire.scorer import WireScorer, WireThresholds
+
+    class Exploding:
+        def score(self, *a, **k):
+            raise RuntimeError("booster is corrupt")
+
+    scorer = WireScorer(thresholds=WireThresholds(model_score=0.01),
+                        model=Exploding())
+    decision = scorer.assess(context("a", "b", 100_000, 0.0))
+
+    assert decision.rail == "wire", "the rail stopped scoring"
+    assert decision.score >= 0.0
+
+
+def test_the_model_contributes_without_deciding():
+    """An INFERENCE weight, so a case still needs something structural.
+
+    If the model alone could raise a case, a rail running with its three best
+    splits inert would be making the decision - which is the arrangement the
+    blend measurement already rejected.
+    """
+    from risk.wire.scorer import INFERENCE, WireScorer, WireThresholds
+
+    limits = WireThresholds(model_score=0.0)      # fires on everything
+    scorer = WireScorer(thresholds=limits, model=type("M", (), {
+        "score": lambda self, *a, **k: 0.9})())
+
+    signals = scorer._model_signal(context("a", "b", 100_000, 0.0), None, None)
+    assert len(signals) == 1
+    assert signals[0].weight == INFERENCE
+    assert signals[0].weight < limits.review_at, (
+        "the model alone must not clear the review bar")

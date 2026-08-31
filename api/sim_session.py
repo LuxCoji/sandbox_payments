@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import copy
 import dataclasses
+import logging
 import os
 import uuid
 from collections import Counter
@@ -64,8 +65,30 @@ def _build_risk():
     from risk.card.scorer import SequenceCardScorer, UntrainedCardScorer
     from risk.engine import FraudRiskEngine
 
+    from risk.wire.scorer import WireScorer
+
+    models = Path(__file__).resolve().parents[1] / "models"
     history = AccountHistory()
-    model_path = Path(__file__).resolve().parents[1] / "models" / "card.pt"
+    model_path = models / "card.pt"
+
+    # The wire model contributes as one signal among several. Optional: the
+    # rules score better alone than any blend of the two rankings, so a missing
+    # booster is a configuration rather than a failure.
+    wire = None
+    wire_model_path = models / "wire_xgboost.json"
+    if wire_model_path.exists():
+        from risk.wire.model import WireModel
+
+        try:
+            wire = WireScorer(model=WireModel.load(wire_model_path))
+        except Exception:
+            # Module-level logger, not the one _run_loop defines locally - this
+            # runs at construction, long before that function exists, so
+            # reaching for it would raise NameError on exactly the path meant
+            # to report a failure gracefully.
+            logging.getLogger("finsim.api").warning(
+                "wire model failed to load; scoring on the rules alone",
+                exc_info=True)
 
     if model_path.exists():
         from risk.card.model import TorchSequenceModel
@@ -75,7 +98,7 @@ def _build_risk():
     else:
         card = UntrainedCardScorer(history=history)
 
-    return FraudRiskEngine(card_scorer=card, history=history)
+    return FraudRiskEngine(card_scorer=card, wire_scorer=wire, history=history)
 
 
 class SimSession:
